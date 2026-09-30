@@ -50,14 +50,14 @@ source install/setup.bash
 # on the boat
 ros2 launch boat_bringup boat_bringup.launch.py
 
-# in simulation
-ros2 launch boat_simulation boat_simulation.launch.py
+# in simulation (kills leftover Gazebo processes first)
+scripts/sim/boatsim.sh
 ```
 
 The control station runs on the boat at `http://<boat-ip>:5000`.
 
-Full documentation is in progress. Development history before October 2026
-is kept in a private archive.
+Full documentation is in progress. Earlier development history is kept in a
+private archive.
 
 ## License
 
