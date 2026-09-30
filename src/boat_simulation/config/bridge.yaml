@@ -1,0 +1,42 @@
+# ros_gz_bridge config. Gazebo topics are mapped to the same ROS topic
+# names the hardware nodes use, so the rest of the stack runs unchanged.
+# Format: https://github.com/gazebosim/ros_gz/tree/ros2/ros_gz_bridge
+
+- ros_topic_name: "boat/gps/fix"
+  gz_topic_name: "/boat/navsat"
+  ros_type_name: "sensor_msgs/msg/NavSatFix"
+  gz_type_name: "gz.msgs.NavSat"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "boat/imu"
+  gz_topic_name: "/boat/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "boat/camera/image_raw"
+  gz_topic_name: "/boat/camera"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+# Camera intrinsics, next to image_raw as ROS expects.
+- ros_topic_name: "boat/camera/camera_info"
+  gz_topic_name: "/boat/camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+
+# Per-propeller thrust in newtons for the Thruster plugins, published by
+# thrust_splitter.
+- ros_topic_name: "boat/sim/left_thrust"
+  gz_topic_name: "/model/boat/joint/left_propeller_joint/cmd_thrust"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "boat/sim/right_thrust"
+  gz_topic_name: "/model/boat/joint/right_propeller_joint/cmd_thrust"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ

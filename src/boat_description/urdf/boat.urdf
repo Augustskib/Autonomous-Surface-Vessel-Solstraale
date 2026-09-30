@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<!--
+  boat.urdf: simple hand-written URDF for RViz2 and TF. Not used by Gazebo,
+  the sim boat is defined in boat_simulation/worlds/boat_world.sdf.
+  Frame ids match gps_publisher and camera_publisher.
+-->
+<robot name="boat">
+
+  <material name="hull_red">
+    <color rgba="0.8 0.1 0.1 1.0"/>
+  </material>
+  <material name="prop_grey">
+    <color rgba="0.2 0.2 0.2 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <!-- Hull mesh, STL in centimetres. TODO: this is an absolute path from
+         an old laptop, point it at a mesh inside the repo. -->
+    <visual>
+      <geometry>
+        <mesh filename="file:///mnt/c/Users/Bruker/Documents/MARITIME.SURFACE.VESSEL/Design/3D.PRINT/ASV_3D.Print.070826.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+      <material name="hull_red"/>
+    </visual>
+    <!-- Collision and inertia: 50 x 30 cm, height ~15 cm (estimate). -->
+    <collision>
+      <geometry>
+        <box size="0.5 0.3 0.15"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="8.0"/>
+      <inertia ixx="0.075" ixy="0" ixz="0" iyy="0.182" iyz="0" izz="0.227"/>
+    </inertial>
+  </link>
+
+  <link name="left_propeller">
+    <visual>
+      <geometry>
+        <cylinder radius="0.05" length="0.05"/>
+      </geometry>
+      <material name="prop_grey"/>
+    </visual>
+  </link>
+  <joint name="left_propeller_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="left_propeller"/>
+    <origin xyz="-0.25 0.15 0" rpy="0 1.5707963 0"/>
+  </joint>
+
+  <link name="right_propeller">
+    <visual>
+      <geometry>
+        <cylinder radius="0.05" length="0.05"/>
+      </geometry>
+      <material name="prop_grey"/>
+    </visual>
+  </link>
+  <joint name="right_propeller_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_propeller"/>
+    <origin xyz="-0.25 -0.15 0" rpy="0 1.5707963 0"/>
+  </joint>
+
+  <!-- Sensor frames for TF. -->
+  <link name="gps_frame"/>
+  <joint name="gps_frame_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="gps_frame"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+  </joint>
+
+  <link name="camera_frame"/>
+  <joint name="camera_frame_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_frame"/>
+    <origin xyz="0.4 0 0.15" rpy="0 0 0"/>
+  </joint>
+
+</robot>

@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>boat_simulation</name>
+  <version>0.1.0</version>
+  <description>Gazebo world, ros_gz bridge config and simulation launch for the boat</description>
+  <maintainer email="augustskib@users.noreply.github.com">August Ramberg</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>boat_hardware_interface</exec_depend>
+  <exec_depend>boat_control</exec_depend>
+  <exec_depend>boat_navigation</exec_depend>
+  <exec_depend>boat_web_ui</exec_depend>
+  <exec_depend>foxglove_bridge</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
