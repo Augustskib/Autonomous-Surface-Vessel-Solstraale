@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>boat_hardware_interface</name>
+  <version>0.1.0</version>
+  <description>Hardware nodes: Arduino motor driver and IMU relay, GPS, power and system monitoring, and the simulation thrust bridge.</description>
+  <maintainer email="augustskib@users.noreply.github.com">August Ramberg</maintainer>
+  <license>MIT</license>
+
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>rclpy</depend>
+  <depend>boat_msgs</depend>
+  <depend>python3-serial</depend>
+  <depend>python3-pynmea2</depend>
+  <!-- smbus2 may need pip if rosdep has no key for it -->
+  <depend>python3-smbus2</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
