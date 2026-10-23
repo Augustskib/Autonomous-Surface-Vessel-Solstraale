@@ -516,8 +516,8 @@ def test_manual_operator_outranks_the_failsafe():
     assert mode == MODE_MANUAL and (left, right) == (80.0, 20.0)
 
 
-def test_failsafe_outranks_the_hold_latch():
-    """The failsafe outranks HOLD: HOLD blocks the mission, not recovery."""
+def test_hold_stops_even_failsafe_recovery():
+    """An operator's Hold is always zero propulsion, including during RTL."""
     a = ControlArbitration()
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
@@ -527,7 +527,7 @@ def test_failsafe_outranks_the_hold_latch():
     a.on_failsafe_level(LEVEL_RETURN_TO_LAUNCH, t)
     a.on_failsafe_thrust(45.0, 30.0, t)
     left, right, mode = a.evaluate(t)
-    assert mode == MODE_FAILSAFE and (left, right) == (45.0, 30.0)
+    assert mode == MODE_HOLD and (left, right) == (0.0, 0.0)
 
 
 def test_failsafe_outranks_the_waypoint_follower():
@@ -562,9 +562,8 @@ def test_estop_outranks_the_failsafe_in_the_arbiter_too():
     assert mode == MODE_ESTOP and (left, right) == (0.0, 0.0)
 
 
-def test_stale_failsafe_level_fails_open():
-    """A stale failsafe level is forgotten (fail open). The e-stop is the
-    mechanism that has to survive a dead safety node."""
+def test_stale_failsafe_level_stays_stopped():
+    """A dead supervisor must not silently hand control back to navigation."""
     a = ControlArbitration(failsafe_timeout_sec=3.0)
     t = 0.0
     a.on_waypoint_thrust(60.0, 60.0, t)
@@ -576,7 +575,8 @@ def test_stale_failsafe_level_fails_open():
         t += 0.2
         a.on_waypoint_thrust(60.0, 60.0, t)
         mode = a.evaluate(t)[2]
-    assert mode == MODE_WAYPOINT, 'a dead supervisor pinned the boat forever'
+    assert mode == MODE_FAILSAFE
+    assert a.evaluate(t)[:2] == (0.0, 0.0)
     assert a.failsafe_expiries == 1
 
 

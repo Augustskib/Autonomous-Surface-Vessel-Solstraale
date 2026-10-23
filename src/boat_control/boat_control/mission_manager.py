@@ -12,6 +12,7 @@ so only routes this node accepted are flown.
 """
 
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -34,6 +35,9 @@ class MissionManager(Node):
         self.declare_parameter('mission_timeout_sec', DEFAULT_MISSION_TIMEOUT_SEC)
         self.logic = MissionStateMachine(
             timeout_sec=float(self.get_parameter('mission_timeout_sec').value))
+        self.logic.set_paused(True, self._now())
+        self.last_mode_at = None
+        self.create_subscription(String, 'boat/mode', self.mode_callback, 10)
 
         self.state_pub = self.create_publisher(String, 'boat/state', 10)
         # The accepted route. waypoint_follower subscribes to this.
@@ -61,7 +65,11 @@ class MissionManager(Node):
     # Helpers
 
     def _now(self):
-        return self.get_clock().now().nanoseconds / 1e9
+        return time.monotonic()
+
+    def mode_callback(self, msg):
+        self.last_mode_at = self._now()
+        self.logic.set_paused(msg.data not in ('IDLE', 'WAYPOINT'), self.last_mode_at)
 
     def _publish_state(self):
         """Publish state on every transition, not only on the 1 Hz timer.
@@ -153,6 +161,8 @@ class MissionManager(Node):
     # Periodic
 
     def publish_state(self):
+        if self.last_mode_at is None or self._now() - self.last_mode_at > 1.0:
+            self.logic.set_paused(True, self._now())
         elapsed = self.logic.tick(self._now())
         if elapsed is not None:
             self.get_logger().warn(

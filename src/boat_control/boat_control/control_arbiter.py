@@ -8,14 +8,17 @@ only see boat/thrust_command.
 The decision logic lives in arbitration.py so it can be tested without ROS.
 This node converts ROS messages and clocks into calls on that class.
 
-Priority: e-stop > manual lease HELD > failsafe > lease HOLD > waypoint > zero
+Priority: e-stop > HOLD > safety stop > manual > recovery > waypoint > zero
 
 Publishes boat/mode (IDLE, MANUAL, WAYPOINT, HOLD, FAILSAFE, ESTOP). If the
 boat won't drive, check `ros2 topic echo boat/mode` first.
 """
 
+import json
+import time
 import rclpy
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from std_msgs.msg import Bool, String
 from boat_msgs.msg import FailsafeState, ThrustCommand
 
@@ -49,6 +52,9 @@ class ControlArbiter(Node):
 
         self.thrust_pub = self.create_publisher(ThrustCommand, 'boat/thrust_command', 10)
         self.mode_pub = self.create_publisher(String, 'boat/mode', 10)
+        self.operator_pub = self.create_publisher(String, 'boat/operator_status', 10)
+        self.estop_pub = self.create_publisher(Bool, 'boat/estop', 10)
+        self.create_subscription(String, 'boat/operator_command', self._operator_callback, 10)
 
         self.create_subscription(
             ThrustCommand, 'boat/cmd/manual', self._manual_callback, 10)
@@ -68,11 +74,12 @@ class ControlArbiter(Node):
         self._last_mode = None       # for change-logging only
         self._last_lease_state = None
 
-        self.create_timer(1.0 / ARBITER_RATE_HZ, self._arbitrate)
+        self.watchdog_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.create_timer(1.0 / ARBITER_RATE_HZ, self._arbitrate, clock=self.watchdog_clock)
 
         self.get_logger().info(
             'Control arbiter started -- sole publisher of boat/thrust_command. '
-            'Priority: estop > manual-lease > failsafe > hold > waypoint > '
+            'Priority: estop > hold > safety-stop > manual > recovery > waypoint > '
             'zero. Source timeout %.2fs, lease timeout %.2fs, failsafe level '
             'timeout %.2fs. Manual requires an explicit lease on '
             'boat/cmd/control_mode; thrust traffic alone no longer counts as '
@@ -83,8 +90,33 @@ class ControlArbiter(Node):
     # Helpers
 
     def _now(self):
-        """rclpy Time to float seconds."""
-        return self.get_clock().now().nanoseconds / 1e9
+        """Monotonic seconds, independent of ROS simulation time."""
+        # Operator watchdogs must still expire if simulation time stops.
+        return time.monotonic()
+
+    def _operator_callback(self, msg):
+        try:
+            data = json.loads(msg.data)
+        except (ValueError, TypeError):
+            return
+        ok, reason = self.logic.on_operator_command(data, self._now())
+        if ok and data.get('intent') in ('ESTOP', 'RESET'):
+            self.estop_pub.publish(Bool(data=data['intent'] == 'ESTOP'))
+        if isinstance(data, dict):
+            self._publish_operator_status(data.get('session'), data.get('seq'), ok, reason)
+
+    def _publish_operator_status(self, session=None, seq=None, accepted=True, reason=''):
+        left, right, mode = self.logic.evaluate(self._now())
+        self.operator_pub.publish(String(data=json.dumps({
+            'session': self.logic.operator_session,
+            'seq': self.logic.operator_seq,
+            'intent': self.logic.operator_intent,
+            'expired': self.logic.operator_expired,
+            'failsafe_stale': self.logic.failsafe_stale,
+            'mode': mode, 'left': left, 'right': right,
+            'request_session': session, 'request_seq': seq,
+            'accepted': accepted, 'reason': reason,
+        })))
 
     # Subscriptions
 
@@ -125,15 +157,13 @@ class ControlArbiter(Node):
 
     def _arbitrate(self):
         before = self.logic.lease_state
-        before_failsafe = self.logic.failsafe_level
+        before_stale = self.logic.failsafe_stale
         left, right, mode = self.logic.evaluate(self._now())
 
-        # A stale failsafe level means safety_monitor stopped publishing.
-        # The arbiter fails open, which is worth a warning.
-        if before_failsafe and not self.logic.failsafe_level:
+        if not before_stale and self.logic.failsafe_stale:
             self.get_logger().error(
                 'Failsafe level went STALE (no boat/failsafe_state for >%.1fs) '
-                '-- falling back to normal arbitration. Is safety_monitor '
+                '-- stopping propulsion. Is safety_monitor '
                 'still running?' % self.logic.failsafe_timeout_sec)
 
         # Lease expiry: the operator's link dropped while driving. The boat
@@ -150,6 +180,7 @@ class ControlArbiter(Node):
         msg.right = float(right)
         self.thrust_pub.publish(msg)
         self.mode_pub.publish(String(data=mode))
+        self._publish_operator_status()
 
         if mode != self._last_mode:
             self.get_logger().info('Control source -> %s' % mode)

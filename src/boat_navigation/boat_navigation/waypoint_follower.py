@@ -14,6 +14,7 @@ steer_gain, base_speed_pct and waypoint_radius_m are parameters, not tuned yet:
 """
 
 import math
+import time
 
 import json
 
@@ -160,6 +161,9 @@ class WaypointFollower(Node):
         self._closest_dist = float('inf')
 
         self.boat_state = None
+        self.control_mode = None
+        self.last_mode_at = None
+        self.create_subscription(String, 'boat/mode', self.mode_callback, 10)
 
         # [lon, lat] pairs (GeoJSON order), oldest first, for the map trail.
         self.trail_coords = []
@@ -277,6 +281,14 @@ class WaypointFollower(Node):
     def state_callback(self, msg: String):
         self.boat_state = msg.data
 
+    def mode_callback(self, msg: String):
+        self.control_mode = msg.data
+        self.last_mode_at = time.monotonic()
+        if msg.data not in ('IDLE', 'WAYPOINT'):
+            # A detour must not count as having flown past the current target.
+            self._closest_dist = float('inf')
+            self._publish_thrust(0.0, 0.0)
+
     def mission_callback(self, msg: MissionCommand):
         if len(msg.latitudes) != len(msg.longitudes):
             self.get_logger().error(
@@ -322,6 +334,12 @@ class WaypointFollower(Node):
             return
 
         self._seen_execute = True
+        if (self.control_mode not in ('IDLE', 'WAYPOINT')
+                or self.last_mode_at is None
+                or time.monotonic() - self.last_mode_at > 1.0):
+            self._closest_dist = float('inf')
+            self._publish_thrust(0.0, 0.0)
+            return
         if self.current_fix is None:
             self._publish_thrust(0.0, 0.0)
             self.get_logger().warn('No GPS fix yet, holding thrust at zero', throttle_duration_sec=5.0)

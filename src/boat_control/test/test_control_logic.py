@@ -101,7 +101,7 @@ def test_explicit_release_also_latches():
     assert a.evaluate(t)[2] == MODE_HOLD
 
 
-def test_estop_beats_everything_and_leaves_lease_intact():
+def test_estop_beats_everything_and_reset_stays_in_hold():
     a = ControlArbitration()
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
@@ -109,6 +109,7 @@ def test_estop_beats_everything_and_leaves_lease_intact():
     a.on_estop(True)
     assert a.evaluate(t) == (0.0, 0.0, MODE_ESTOP)
     a.on_estop(False)
+    assert a.evaluate(t) == (0.0, 0.0, MODE_HOLD)
     a.on_manual_thrust(100.0, 100.0, t)
     a.on_control_mode(CMD_MANUAL, t)
     assert a.evaluate(t)[2] == MODE_MANUAL

@@ -4,6 +4,7 @@ import socket
 import subprocess
 import threading
 import time
+from pathlib import Path
 import cv2
 import rclpy
 from rclpy.node import Node
@@ -136,6 +137,9 @@ latest_estop = False
 # ESTOP. If a mission is executing but this is not WAYPOINT, something else
 # is holding control.
 latest_mode = None
+latest_operator = {}
+latest_operator_time = None
+operator_receipts = {}
 # How long a control route waits for the ROS graph to confirm the result.
 CONTROL_ACK_TIMEOUT_SEC = 1.5
 CONTROL_ACK_POLL_SEC = 0.02
@@ -231,6 +235,8 @@ NAV_HTML = """
     <span class="nav-spacer"></span>
     <span class="nav-note" id="nav_note">&mdash;</span>
 </nav>
+<div id="operator_notice" role="status" aria-live="polite" style="padding:10px 18px;white-space:normal">Control changes are confirmed by the arbiter. Hold means zero thrust, not GPS position-holding.</div>
+<label style="display:block;padding:0 18px 10px">Safety override reason (only for override/disable): <input id="operator_reason" type="text" maxlength="240" placeholder="Enter a reason before overriding safety"></label>
 <div class="banner none" id="fs_banner">
     <span class="b-glyph" id="fs_glyph">&#9679;</span>
     <span id="fs_word">WAITING FOR SUPERVISOR</span>
@@ -242,6 +248,10 @@ NAV_HTML = """
 # Banner logic shared by both pages. Each page calls updateBanner(data)
 # from its telemetry poll.
 BANNER_JS = """
+function notifyOperator(message) {
+    const el = document.getElementById('operator_notice');
+    if (el) el.textContent = message;
+}
 // Failsafe levels, mirroring boat_msgs/msg/FailsafeState.msg.
 const FS_NOMINAL = 0, FS_HOLD = 1, FS_RTL = 2, FS_PSTOP = 3, FS_HARD = 4;
 
@@ -270,14 +280,18 @@ function updateBanner(data) {
 
     if (data.estop) {
         cls = 'bad'; glyphHtml = '&#9632;'; text = 'ENGINE STOP ENGAGED';
-        reason = 'All propulsion cut. Press Reset / Idle on the Pilot page to clear.';
+        reason = 'All propulsion cut. Reset to Hold, then choose the next action.';
+    } else if ((data.operator || {}).failsafe_stale) {
+        cls = 'bad'; glyphHtml = '&#9632;'; text = 'SAFETY LINK STALE';
+        reason = 'Propulsion stopped: the safety supervisor stopped reporting.';
     } else if (fs.level >= FS_PSTOP) {
         cls = 'bad'; glyphHtml = '&#9632;'; text = 'POWERED STOP';
         reason = fs.degraded_reason
             ? ('Wanted ' + (fs.requested_level_name || 'a recovery') + ' but ' + fs.degraded_reason)
             : (fs.active_reasons && fs.active_reasons[0]) || fs.reason || '';
     } else if (fs.level === FS_RTL) {
-        cls = 'bad'; glyphHtml = '&#8676;'; text = 'RETURNING TO LAUNCH';
+        cls = 'bad'; glyphHtml = '&#8676;';
+        text = data.mode === 'FAILSAFE' ? 'RETURN-TO-LAUNCH CONTROL' : 'RETURN-TO-LAUNCH REQUESTED';
         reason = ((fs.active_reasons && fs.active_reasons[0]) || fs.reason || '');
         if (fs.distance_to_launch_m !== null && fs.distance_to_launch_m !== undefined) {
             reason += '  ·  ' + fs.distance_to_launch_m.toFixed(0) + ' m to go';
@@ -336,10 +350,8 @@ function clearFailsafe(force) {
     let body = {force: false};
     if (force) {
         // Force override needs a typed reason, recorded on boat/data_events.
-        const reason = prompt(
-            'OVERRIDE: clear the failsafe even though a condition is still '
-            + 'active.\\n\\nThis is recorded in the run data. Type why:');
-        if (!reason) return;
+        const reason = document.getElementById('operator_reason').value.trim();
+        if (!reason) { notifyOperator('Enter a safety override reason first.'); return; }
         body = {force: true, reason: reason};
     }
     fetch('/failsafe/clear', {
@@ -347,7 +359,7 @@ function clearFailsafe(force) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body),
     }).then((r) => r.json()).then((d) => {
-        if (d.status !== 'ok') alert('Clear failed: ' + (d.error || 'unknown error'));
+        if (d.status !== 'ok') notifyOperator('Clear failed: ' + (d.error || 'unknown error'));
     });
 }
 
@@ -758,26 +770,27 @@ HTML_PAGE = """
         <div class="box">
             <div class="box-hdr">Control Source</div>
             <div class="kv"><i>Arbiter Mode</i><b class="val sm" id="mode_state">--</b></div>
-            <div class="kv"><i>Manual Lease</i><b class="val sm" id="lease_state">not held</b></div>
+            <div class="kv"><i>Your Control</i><b class="val sm" id="lease_state">not acquired</b></div>
             <div class="btngrid">
                 <button onclick="acquireLease('button')">Take Manual</button>
-                <button onclick="releaseLease()">Release</button>
-                <button class="btn-go" onclick="resumeAuto()">Resume Auto</button>
+                <button onclick="releaseLease()">Hold</button>
+                <button class="btn-go" onclick="resumeAuto()">Continue Mission</button>
             </div>
         </div>
 
         <div class="box">
             <div class="box-hdr">Controls</div>
             <div class="btngrid">
-                <button class="btn-go" onclick="sendMission()">Send Mission</button>
+                <button class="btn-go" onclick="sendMission()">Start Mission</button>
                 <button onclick="clearPending()">Clear Points</button>
-                <button onclick="cancelMission()">Cancel</button>
+                <button onclick="cancelMission()">Cancel Mission</button>
                 <button onclick="returnToDock()">Return Dock</button>
                 <button onclick="setDockHere()">Set Dock Here</button>
-                <button onclick="clearActive()">Clear Route</button>
+                <button onclick="clearActive()">Hide Route Drawing</button>
                 <button class="btn-estop" onclick="engineStop()">Engine Stop</button>
-                <button class="btn-clear" onclick="resetToIdle()">Reset / Idle</button>
+                <button class="btn-clear" onclick="resetToIdle()">Reset to Hold</button>
             </div>
+            <div style="padding:12px">Motor bars show requested thrust, not measured motor output.</div>
         </div>
     </aside>
 
@@ -823,142 +836,7 @@ function setCell(id, text, cls) {
     el.className = cls ? ('val sm ' + cls) : 'val sm';
 }
 
-// --- Manual control lease -------------------------------------------
-// The drive loop resends thrust every 200 ms because motor_driver has a
-// 0.5 s watchdog. It only runs while the page holds the manual lease:
-//   * acquire on a WASD keypress or the Take Manual button
-//   * hold by sending MANUAL with each thrust command
-//   * release with the button, or after LEASE_IDLE_RELEASE_MS idle
-//   * release latches thrust to zero. Autonomy needs an explicit Resume.
-// Sending 0/0 without a lease used to starve the waypoint follower.
-let leaseHeld = false;
-let leaseTimer = null;
-let lastKeyActivity = 0;
-
-// Auto-release after this long with no key pressed.
-const LEASE_IDLE_RELEASE_MS = 5000;
-
-function setModeBadge() {
-    const el = document.getElementById('lease_state');
-    if (!el) return;
-    el.innerText = leaseHeld ? 'HELD (you are driving)' : 'not held';
-    el.className = leaseHeld ? 'val sm amb' : 'val sm';
-}
-
-function acquireLease(reason) {
-    if (leaseHeld) return;
-    leaseHeld = true;
-    lastKeyActivity = Date.now();
-    setModeBadge();
-    fetch('/control_mode', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({mode: 'MANUAL'}),
-    });
-    // Start the drive loop only now.
-    if (leaseTimer === null) leaseTimer = setInterval(updateThrust, 200);
-    console.log('manual lease acquired:', reason);
-}
-
-function releaseLease() {
-    for (const k of Object.keys(keys)) keys[k] = false;
-    if (!leaseTimer && !leaseHeld) return;
-    leaseHeld = false;
-    if (leaseTimer !== null) { clearInterval(leaseTimer); leaseTimer = null; }
-    left = 0; right = 0;
-    document.getElementById('left_val').innerText = 0;
-    document.getElementById('right_val').innerText = 0;
-    setBar('left_bar', 0);
-    setBar('right_bar', 0);
-    setModeBadge();
-    // Send a final zero while the lease is still held, then release.
-    fetch('/thrust', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({left: 0, right: 0}),
-    }).finally(() => {
-        fetch('/control_mode', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({mode: 'RELEASE'}),
-        });
-    });
-}
-
-function resumeAuto() {
-    // Allow autonomy to drive again. Never done implicitly.
-    if (leaseHeld) releaseLease();
-    fetch('/control_mode', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({mode: 'RESUME'}),
-    }).then((r) => r.json()).then((d) => {
-        if (d.status !== 'ok') alert('Resume failed: ' + (d.error || 'unknown error'));
-    });
-}
-
-function updateThrust() {
-    if (!leaseHeld) return;
-    let l = 0, r = 0;
-    if (keys['w']) { l += MANUAL_THRUST_LIMIT; r += MANUAL_THRUST_LIMIT; }
-    if (keys['s']) { l -= MANUAL_THRUST_LIMIT; r -= MANUAL_THRUST_LIMIT; }
-    if (keys['a']) { l -= MANUAL_THRUST_LIMIT; r += MANUAL_THRUST_LIMIT; }
-    if (keys['d']) { l += MANUAL_THRUST_LIMIT; r -= MANUAL_THRUST_LIMIT; }
-    l = Math.max(-100, Math.min(100, l));
-    r = Math.max(-100, Math.min(100, r));
-    left = l; right = r;
-    document.getElementById('left_val').innerText = left;
-    document.getElementById('right_val').innerText = right;
-    setBar('left_bar', left);
-    setBar('right_bar', right);
-
-    // Idle auto-release.
-    if (Date.now() - lastKeyActivity > LEASE_IDLE_RELEASE_MS) {
-        releaseLease();
-        return;
-    }
-
-    // Lease heartbeat with each thrust command.
-    fetch('/thrust', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({left: left, right: right})
-    });
-    fetch('/control_mode', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({mode: 'MANUAL'}),
-    });
-}
-
-const DRIVE_KEYS = ['w', 'a', 's', 'd'];
-
-document.addEventListener('keydown', (e) => {
-    if (e.target.closest('input, textarea, select, [contenteditable=true]')) return;
-    const k = e.key.toLowerCase();
-    keys[k] = true;
-    if (DRIVE_KEYS.indexOf(k) !== -1) {
-        lastKeyActivity = Date.now();
-        // A keypress acquires the lease.
-        acquireLease('keypress');
-    }
-});
-document.addEventListener('keyup', (e) => {
-    const k = e.key.toLowerCase();
-    keys[k] = false;
-    if (DRIVE_KEYS.indexOf(k) !== -1) lastKeyActivity = Date.now();
-});
-
-window.addEventListener('blur', releaseLease);
-document.addEventListener('visibilitychange', () => {
-    if (document.hidden) releaseLease();
-});
-
-// Leaving the page releases the lease.
-window.addEventListener('beforeunload', () => {
-    if (leaseHeld) navigator.sendBeacon('/control_mode',
-        new Blob([JSON.stringify({mode: 'RELEASE'})], {type: 'application/json'}));
-});
+//__OPERATOR_JS__
 
 // --- Live chart (boat/gps/fix + boat/mission_geojson via /telemetry) ---
 const map = L.map('map', {zoomControl: true, attributionControl: true}).setView([0, 0], 3);
@@ -1047,7 +925,7 @@ function postFence(body, okMsg) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body),
     }).then((r) => r.json()).then((d) => {
-        if (d.status !== 'ok') alert('Geofence command failed: ' + (d.error || 'unknown'));
+        if (d.status !== 'ok') notifyOperator('Geofence command failed: ' + (d.error || 'unknown'));
         else if (okMsg) console.log(okMsg);
         fenceKey = null;   // force a redraw
     });
@@ -1057,11 +935,11 @@ function setFenceHere() {
     const radius = parseFloat(document.getElementById('fence_radius_in').value);
     const warn = parseFloat(document.getElementById('fence_warn_in').value);
     if (!isFinite(radius) || radius < 5) {
-        alert('Radius must be a number of at least 5 m.');
+        notifyOperator('Radius must be a number of at least 5 m.');
         return;
     }
     if (!isFinite(warn) || warn <= 0 || warn >= 1) {
-        alert('Warning-ring fraction must be between 0 and 1 (e.g. 0.9).');
+        notifyOperator('Warning-ring fraction must be between 0 and 1 (e.g. 0.9).');
         return;
     }
     postFence({action: 'set_here', radius_m: radius, warn_fraction: warn},
@@ -1078,11 +956,8 @@ function enableFence() {
 
 function disableFence() {
     // Disabling needs a typed reason. The banner stays amber while off.
-    const reason = prompt(
-        'DISABLE THE GEOFENCE?\\n\\nThe boat will have no boundary. This is '
-        + 'recorded in the run data and the dashboard will stay flagged '
-        + 'until it is re-enabled.\\n\\nType the reason:');
-    if (!reason) return;
+    const reason = document.getElementById('operator_reason').value.trim();
+    if (!reason) { notifyOperator('Enter a reason before disabling the geofence.'); return; }
     postFence({action: 'disable', reason: reason}, 'fence disabled');
 }
 
@@ -1096,6 +971,8 @@ let activeMarkers = [];
 let activeLine = null;
 // Mirrors nav.active, so Clear Points does not wipe a running route.
 let missionActive = false;
+let routeBusy = false;
+let routeRequest = null;
 
 // Corner-bracket reticle marker.
 function wpIcon(n, cls) {
@@ -1164,70 +1041,53 @@ function styleActiveRoute(currentIdx) {
     });
 }
 
-function sendMission() {
-    if (pendingPoints.length === 0) {
-        alert('Click the chart to plot at least one waypoint first.');
-        return;
-    }
-    const latitudes = pendingPoints.map((p) => p[0]);
-    const longitudes = pendingPoints.map((p) => p[1]);
-    const dispatched = pendingPoints.slice();
-    fetch('/mission', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({latitudes: latitudes, longitudes: longitudes}),
-    }).then((r) => r.json()).then((data) => {
-        if (data.status !== 'ok') {
-            // The server waits for boat/state EXECUTE before reporting.
-            alert('Mission rejected: ' + (data.error || 'unknown error'));
-        } else {
-            clearPending();
-            drawActiveRoute(dispatched);
-            // Accepted, but the boat will not move in MANUAL or HOLD.
-            if (data.warning) alert(data.warning);
-        }
-    });
+// Route commands never silently replace an executing mission.
+async function startRoute(points) {
+    if (routeBusy) { notifyOperator('A route request is already pending. Manual and Hold are still available.'); return false; }
+    if (!points.length) { notifyOperator('Plot at least one waypoint first.'); return false; }
+    if (missionActive) { notifyOperator('A mission is retained. Continue it or cancel it before starting a new route.'); return false; }
+    routeBusy = true;
+    try {
+        if (!await releaseLease()) return false;
+        const revision = operator.revision;
+        routeRequest = postCommand('/mission', {latitudes:points.map(p=>p[0]), longitudes:points.map(p=>p[1])});
+        await routeRequest;
+        // A takeover or stop during mission acceptance must win.
+        if (operator.revision !== revision) return false;
+        missionActive = true;
+        drawActiveRoute(points);
+        const ok = await operator.transition('AUTO');
+        notifyOperator(ok ? 'Mission accepted. Navigation has control unless a safety stop is active.' : 'Mission retained; control is not confirmed.');
+        return ok;
+    } catch(error) { notifyOperator(error.message + ' Route acceptance is not confirmed; check mission status before retrying.'); return false; }
+    finally { routeBusy = false; routeRequest = null; }
+}
+async function sendMission() {
+    const points = pendingPoints.slice();
+    if (await startRoute(points)) clearPending();
 }
 
-function sendEstop(active) {
-    // The server waits for boat/estop to echo back, so a failure here
-    // means the stop did not take effect.
-    return fetch('/estop', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({active: active}),
-    }).then((r) => r.json()).then((d) => {
-        if (d.status !== 'ok') {
-            alert('Engine stop command failed: ' + (d.error || 'unknown error'));
-        }
-        return d;
-    });
-}
-
-// ENGINE STOP: cut propulsion and abort. Latches until RESET.
 function engineStop() {
-    sendEstop(true);
+    clearDriveKeys();
+    notifyOperator('Requesting emergency stop.');
+    return operator.transition('ESTOP');
 }
-
-// RESET / IDLE: release the lease, clear the e-stop latch and the finished
-// route. Leaves the arbiter in HOLD; autonomy needs Resume.
 function resetToIdle() {
-    releaseLease();
-    sendEstop(false);
-    if (!missionActive) clearActive();
+    clearDriveKeys();
+    notifyOperator('Clearing E-stop into Hold. This does not resume a mission.');
+    return operator.transition('RESET');
 }
-
-// Cancel Mission: stop the mission and return to IDLE via
-// boat/mission_cancel.
-function cancelMission() {
-    fetch('/mission/cancel', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: '{}',
-    }).then((r) => r.json()).then((d) => {
-        if (d.status !== 'ok') alert('Cancel failed: ' + (d.error || 'unknown error'));
-        else clearActive();
-    });
+async function cancelMission() {
+    if (!await releaseLease()) return;
+    const revision = operator.revision;
+    try {
+        if (routeRequest) await routeRequest.catch(() => {});
+        if (operator.revision !== revision) return;
+        await postCommand('/mission/cancel', {});
+        if (operator.revision !== revision) return;
+        missionActive = false; clearActive();
+        notifyOperator('Mission cancelled. Holding zero thrust.');
+    } catch(error) { notifyOperator(error.message); }
 }
 
 // Dock / home position, owned by the server (see /dock). Auto-captured from
@@ -1257,14 +1117,14 @@ function setDock(lat, lon) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({lat: lat, lon: lon}),
     }).then((r) => r.json()).then((d) => {
-        if (d.status !== 'ok') alert('Set dock failed: ' + (d.error || 'unknown error'));
+        if (d.status !== 'ok') notifyOperator('Set dock failed: ' + (d.error || 'unknown error'));
     });
 }
 
 // Set the dock to the boat's current position.
 function setDockHere() {
     if (!lastFix) {
-        alert('No GPS fix yet -- cannot set the dock to the boat position.');
+        notifyOperator('No GPS fix yet -- cannot set the dock to the boat position.');
         return;
     }
     setDock(lastFix[0], lastFix[1]);
@@ -1286,22 +1146,13 @@ function toggleDetections() {
     });
 }
 
-function returnToDock() {
-    if (!dockPoint) {
-        alert('Dock position not set yet (waiting for first GPS fix).');
+async function returnToDock() {
+    if (!dockPoint) { notifyOperator('Dock position is not set.'); return; }
+    if (missionActive) {
+        notifyOperator('Cancel the current mission before starting a new route to the dock.');
         return;
     }
-    fetch('/mission', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({latitudes: [dockPoint[0]], longitudes: [dockPoint[1]]}),
-    }).then((r) => r.json()).then((data) => {
-        if (data.status !== 'ok') {
-            alert('Return to dock rejected: ' + (data.error || 'unknown error'));
-        } else {
-            drawActiveRoute([dockPoint]);
-        }
-    });
+    await startRoute([dockPoint]);
 }
 
 function attitudeClass(v) {
@@ -1315,8 +1166,10 @@ function attitudeClass(v) {
 function updateTelemetry() {
     fetch('/telemetry').then((r) => r.json()).then((data) => {
         const lb = document.getElementById('link_badge');
-        lb.innerText = 'LINK OK';
-        lb.className = 'badge ok';
+        const controlFresh = data.operator_age_s != null && data.operator_age_s <= 1;
+        lb.innerText = controlFresh ? 'CONTROL LINK OK' : 'CONTROL LINK STALE';
+        lb.className = controlFresh ? 'badge ok' : 'badge bad';
+        operator.observe(data.operator, data.operator_age_s);
 
         const state = data.state || '--';
         const sb = document.getElementById('state_badge');
@@ -1326,16 +1179,15 @@ function updateTelemetry() {
                                  : state === 'IDLE' ? 'warn' : '');
 
         // Source control_arbiter selects. EXECUTE + WAYPOINT means the boat
-        // is driving its route. EXECUTE + MANUAL or HOLD means it will not
-        // move.
-        const mode = data.mode || '--';
+        // is driving its route. Manual can drive while that route is paused.
+        const mode = controlFresh ? (data.operator.mode || data.mode || '--') : 'UNKNOWN';
         setCell('mode_state', mode,
                 mode === 'WAYPOINT' ? 'grn'
               : mode === 'MANUAL' ? 'amb'
               : mode === 'ESTOP' ? 'red'
               : mode === 'HOLD' ? 'amb' : '');
         if (state === 'EXECUTE' && (mode === 'MANUAL' || mode === 'HOLD')) {
-            sb.innerText = state + ' (not driving)';
+            sb.innerText = mode === 'MANUAL' ? 'MISSION PAUSED / MANUAL CONTROL' : 'MISSION PAUSED / HOLD';
             sb.className = 'badge warn';
         }
 
@@ -1409,7 +1261,7 @@ function updateTelemetry() {
         pitchEl.className = 'val ' + attitudeClass(data.pitch);
 
         const nav = data.nav || {};
-        missionActive = !!nav.active;
+        missionActive = state === 'EXECUTE';
 
         // nav_status is m/s. km/h is for display only.
         document.getElementById('speed_val').innerText =
@@ -1425,7 +1277,7 @@ function updateTelemetry() {
         const banner = document.getElementById('mission_banner');
         if (nav.active && nav.waypoint_count) {
             const n = nav.waypoint_index + 1;
-            let txt = 'WAYPOINT ' + n + ' / ' + nav.waypoint_count;
+            let txt = (mode === 'WAYPOINT' ? '' : 'PAUSED · ') + 'WAYPOINT ' + n + ' / ' + nav.waypoint_count;
             if (nav.distance_m !== null && nav.distance_m !== undefined) {
                 txt += '  ·  ' + fmtDist(nav.distance_m) + ' OUT';
             }
@@ -1461,7 +1313,7 @@ function updateTelemetry() {
         if (data.estop) {
             esEl.innerText = 'ENGAGED';
             esEl.className = 'val sm red';
-            banner.innerText = 'ENGINE STOP ENGAGED · PRESS RESET / IDLE TO RESUME';
+            banner.innerText = 'ENGINE STOP ENGAGED · RESET TO HOLD, THEN CHOOSE YOUR NEXT ACTION';
             banner.className = 'mission-banner';
             banner.style.color = 'var(--red)';
             banner.style.borderColor = 'var(--red)';
@@ -1992,7 +1844,7 @@ function startDataRun() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({site: site, purpose: purpose, source: source}),
     }).then((r) => r.json()).then((data) => {
-        if (data.status !== 'ok') alert('Start failed: ' + (data.error || 'unknown error'));
+        if (data.status !== 'ok') notifyOperator('Start failed: ' + (data.error || 'unknown error'));
     });
 }
 
@@ -2007,7 +1859,7 @@ function beginSegment() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({label: label}),
     }).then((r) => r.json()).then((data) => {
-        if (data.status !== 'ok') alert('Begin segment failed: ' + (data.error || 'unknown error'));
+        if (data.status !== 'ok') notifyOperator('Begin segment failed: ' + (data.error || 'unknown error'));
         else document.getElementById('segment_label').value = '';
     });
 }
@@ -2015,7 +1867,7 @@ function beginSegment() {
 function endSegment() {
     // Ends the oldest open segment.
     if (!currentOpenSegments.length) {
-        alert('No open segment to end.');
+        notifyOperator('No open segment to end.');
         return;
     }
     fetch('/data/segment_end', {
@@ -2023,7 +1875,7 @@ function endSegment() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({step_id: currentOpenSegments[0]}),
     }).then((r) => r.json()).then((data) => {
-        if (data.status !== 'ok') alert('End segment failed: ' + (data.error || 'unknown error'));
+        if (data.status !== 'ok') notifyOperator('End segment failed: ' + (data.error || 'unknown error'));
     });
 }
 
@@ -2251,6 +2103,7 @@ def _compose(page, active):
     out = page.replace('/*__NAV_CSS__*/', NAV_CSS)
     out = out.replace('<!--__NAV__-->', NAV_HTML)
     out = out.replace('//__BANNER_JS__', BANNER_JS)
+    out = out.replace('//__OPERATOR_JS__', Path(__file__).with_name('operator_controls.js').read_text(encoding='utf-8'))
     out = out.replace('NAV_ACTIVE_CONTROL', 'active' if active == 'control' else '')
     out = out.replace('NAV_ACTIVE_DATA', 'active' if active == 'data' else '')
     return out
@@ -2378,6 +2231,9 @@ def thrust():
     if not ros_node:
         return jsonify({'status': 'error', 'error': 'ROS node not ready'}), 503
 
+    if latest_operator.get('session'):
+        return jsonify({'status': 'error', 'error': 'Reload dashboard: sequenced controls are active'}), 409
+
     limit = ros_node.manual_thrust_limit
     left = max(-limit, min(limit, left))
     right = max(-limit, min(limit, right))
@@ -2405,6 +2261,9 @@ def control_mode():
     if not ros_node:
         return jsonify({'status': 'error', 'error': 'ROS node not ready'}), 503
 
+    if latest_operator.get('session'):
+        return jsonify({'status': 'error', 'error': 'Reload dashboard: sequenced controls are active'}), 409
+
     ros_node.publish_control_mode(mode)
 
     # Do not wait on the 5 Hz MANUAL heartbeat, only on the one-shot
@@ -2430,6 +2289,40 @@ def control_mode():
             'mode': observed,
         }), 504
     return jsonify({'status': 'ok', 'mode': observed})
+
+
+@app.route('/operator', methods=['POST'])
+def operator_command():
+    """An atomic, sequenced command. Success means the arbiter acknowledged it."""
+    data = request.get_json(silent=True) or {}
+    session, seq = data.get('session'), data.get('seq')
+    if (not isinstance(session, str) or not 1 <= len(session) <= 80
+            or type(seq) is not int or seq < 0
+            or data.get('intent') not in ('MANUAL', 'AUTO', 'HOLD', 'ESTOP', 'RESET')
+            or type(data.get('transition')) is not bool):
+        return jsonify(status='error', error='Invalid operator command'), 400
+    if not ros_node:
+        return jsonify(status='error', error='ROS node not ready'), 503
+    try:
+        left, right = float(data.get('left', 0)), float(data.get('right', 0))
+        if not all(math.isfinite(v) for v in (left, right)):
+            raise ValueError()
+    except (ValueError, TypeError):
+        return jsonify(status='error', error='Invalid thrust'), 400
+    limit = ros_node.manual_thrust_limit
+    data['left'] = max(-limit, min(limit, left))
+    data['right'] = max(-limit, min(limit, right))
+    key = (session, seq)
+    ros_node.operator_pub.publish(String(data=json.dumps(data)))
+    def receipt_ready():
+        with telemetry_lock:
+            return key in operator_receipts
+    if not _await(receipt_ready):
+        return jsonify(status='error', error='No control acknowledgement. Control will hold on heartbeat timeout.'), 504
+    with telemetry_lock:
+        result = operator_receipts.get(key, {})
+    return jsonify(status='ok' if result.get('accepted') else 'error',
+                   error=result.get('reason'), operator=result), (200 if result.get('accepted') else 409)
 
 
 @app.route('/mission', methods=['POST'])
@@ -2459,7 +2352,7 @@ def mission():
     # Quick rejections with a clear reason.
     if estopped:
         return jsonify({'status': 'error',
-                        'error': 'engine stop is engaged -- press Reset / Idle first',
+                        'error': 'engine stop is engaged -- press Reset to Hold first',
                         'state': state}), 409
     if state not in ('IDLE', 'ABORTED'):
         return jsonify({
@@ -2488,7 +2381,7 @@ def mission():
     warning = None
     if mode in ('MANUAL', 'HOLD'):
         warning = (f'Mission accepted, but control is {mode} -- press '
-                   f'"Resume Auto" to let the boat drive it.')
+                   f'"Continue Mission" to let the boat drive it.')
     return jsonify({'status': 'ok', 'state': 'EXECUTE', 'mode': mode,
                     'warning': warning})
 
@@ -2642,6 +2535,9 @@ def telemetry():
             'lon': latest_gps['lon'],
             'state': latest_state,
             'mode': latest_mode,
+            'operator': dict(latest_operator),
+            'operator_age_s': (time.monotonic() - latest_operator_time
+                               if latest_operator_time is not None else None),
             'geojson': latest_geojson,
             'heading': latest_imu['heading'],
             'roll': latest_imu['roll'],
@@ -2803,6 +2699,8 @@ class WebServerNode(Node):
         # Manual thrust goes to boat/cmd/manual. control_arbiter owns
         # boat/thrust_command.
         self.thrust_pub = self.create_publisher(ThrustCommand, 'boat/cmd/manual', 10)
+        self.operator_pub = self.create_publisher(String, 'boat/operator_command', 10)
+        self.create_subscription(String, 'boat/operator_status', self.operator_callback, 10)
         self.mission_pub = self.create_publisher(MissionCommand, 'boat/mission_command', 10)
         self.estop_pub = self.create_publisher(Bool, 'boat/estop', 10)
         # Manual lease: MANUAL / RELEASE / RESUME, see boat_control/arbitration.py.
@@ -2866,6 +2764,22 @@ class WebServerNode(Node):
         self.gcs_heartbeat_pub = self.create_publisher(Empty, 'boat/gcs_heartbeat', 10)
 
         self.get_logger().info('Web dashboard node started, dashboard at :5000')
+
+    def operator_callback(self, msg):
+        global latest_operator, latest_operator_time
+        try:
+            data = json.loads(msg.data)
+            if not isinstance(data, dict):
+                return
+        except (ValueError, TypeError):
+            return
+        with telemetry_lock:
+            latest_operator = data
+            latest_operator_time = time.monotonic()
+            if data.get('request_session') is not None:
+                operator_receipts[(data['request_session'], data['request_seq'])] = data
+                while len(operator_receipts) > 256:
+                    del operator_receipts[next(iter(operator_receipts))]
 
     def image_callback(self, msg):
         global latest_frame

@@ -42,6 +42,8 @@ class MissionStateMachine:
         self.execute_started_at = None
         # Point count of the loaded mission.
         self.active_point_count = 0
+        self.paused = False
+        self.paused_since = None
 
     # Transitions
 
@@ -66,6 +68,7 @@ class MissionStateMachine:
             return False, REASON_EMPTY
         self.state = EXECUTE
         self.execute_started_at = now
+        self.paused_since = now if self.paused else None
         self.active_point_count = num_points
         return True, REASON_OK
 
@@ -116,6 +119,8 @@ class MissionStateMachine:
         """Watchdog. Returns elapsed seconds if it timed out, else None."""
         if self.state != EXECUTE or self.execute_started_at is None:
             return None
+        if self.paused:
+            return None
         elapsed = now - self.execute_started_at
         if elapsed > self.timeout_sec:
             self.state = ABORTED
@@ -123,6 +128,19 @@ class MissionStateMachine:
             self.active_point_count = 0
             return elapsed
         return None
+
+    def set_paused(self, paused, now):
+        """Retain the mission and count only time under autonomous control."""
+        paused = bool(paused)
+        if paused == self.paused:
+            return
+        if paused:
+            self.paused_since = now if self.state == EXECUTE else None
+        else:
+            if self.execute_started_at is not None and self.paused_since is not None:
+                self.execute_started_at += max(0, now - self.paused_since)
+            self.paused_since = None
+        self.paused = paused
 
     # Queries
 

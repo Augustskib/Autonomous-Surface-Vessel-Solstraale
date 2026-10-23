@@ -20,20 +20,12 @@ Lease states:
         only on RESUME (to AUTO) or a new MANUAL acquire (to HELD).
         A dropped connection must not hand the boat back to autonomy.
 
-Priority, highest first:
-  1. e-stop               zero. Pure output override, the lease state is kept.
-  2. manual lease HELD    operator values
-  3. failsafe level >= 1  failsafe values, or zero
-  4. lease HOLD           latched zero
-  5. waypoint             autonomy
-  6. nothing              zero
-
-Manual outranks the failsafe so an operator steering the boat back inside
-the fence doesn't fight the return-to-launch controller. The failsafe
-outranks HOLD because HOLD blocks resuming the mission, not recovering the
-boat. The failsafe level is freshness checked too: if safety_monitor dies
-the arbiter falls back to the normal chain instead of latching forever
-(e-stop is a separate topic from the dashboard).
+Priority: e-stop > operator HOLD > safety stop > manual > recovery > waypoint.
+Hold always means zero propulsion. Manual can override return-to-launch,
+but cannot override a safety stop. Resetting e-stop leaves Hold latched.
+After the dashboard acquires control, both Manual and Auto require its
+sequenced heartbeat. A lost heartbeat latches Hold until an explicit action.
+An established safety-monitor feed going stale also stops propulsion.
 """
 
 import math
@@ -138,6 +130,7 @@ class ControlArbitration:
         # thrust: POWERED_STOP sends no thrust but still outranks waypoints.
         self.failsafe_level = FAILSAFE_NOMINAL
         self.failsafe_level_stamp = None
+        self.failsafe_stale = False
 
         # Start in AUTO so a mission sent from the command line can run
         # without a browser.
@@ -150,6 +143,68 @@ class ControlArbitration:
         self.rejected_failsafe = 0
         self.lease_expiries = 0
         self.failsafe_expiries = 0
+        # Dashboard commands carry mode + thrust together on one ordered topic.
+        self.operator_session = None
+        self.operator_seq = -1
+        self.operator_intent = 'HOLD'
+        self.operator_stamp = None
+        self.operator_expired = False
+        self.retired_sessions = set()
+
+    def on_operator_command(self, data, now):
+        """Apply a sequenced dashboard command; renewals cannot revive a lost lease."""
+        if not isinstance(data, dict):
+            return False, 'Invalid command'
+        session, seq = data.get('session'), data.get('seq')
+        intent, transition = data.get('intent'), data.get('transition') is True
+        if (not isinstance(session, str) or not 1 <= len(session) <= 80
+                or type(seq) is not int or seq < 0
+                or intent not in ('MANUAL', 'AUTO', 'HOLD', 'ESTOP', 'RESET')
+                or type(data.get('transition')) is not bool):
+            return False, 'Invalid command'
+        clean = sanitize_thrust(data.get('left', 0), data.get('right', 0))
+        if clean is None:
+            return False, 'Invalid thrust'
+        if session in self.retired_sessions:
+            return False, 'Control belongs to another session; reload to take over'
+        if session != self.operator_session:
+            if not transition or intent not in ('MANUAL', 'HOLD', 'ESTOP', 'RESET'):
+                return False, 'Take Manual or Hold before continuing a mission'
+            if self.operator_session:
+                self.retired_sessions.add(self.operator_session)
+            self.operator_session, self.operator_seq = session, -1
+        if seq <= self.operator_seq:
+            return False, 'Superseded command'
+        self.operator_seq = seq
+        self._expire_operator(now)
+        if intent in ('ESTOP', 'RESET'):
+            if not transition:
+                return False, 'Stop/reset requires an explicit action'
+            self.on_estop(intent == 'ESTOP')
+            intent = 'HOLD'
+        if self.estopped and intent != 'HOLD':
+            return False, 'E-stop active; reset to Hold first'
+        if not transition and (self.operator_expired or intent != self.operator_intent):
+            return False, 'Control expired or changed; choose Take Manual or Continue Mission'
+        self.operator_intent = intent
+        self.operator_stamp = now
+        self.operator_expired = False
+        self.lease_state = {'MANUAL': LEASE_HELD, 'AUTO': LEASE_AUTO, 'HOLD': LEASE_HOLD}[intent]
+        self.lease_stamp = now if intent == 'MANUAL' else None
+        self.manual.update(*(clean if intent == 'MANUAL' else (0, 0)), now)
+        if transition and intent == 'AUTO':
+            # Require a new navigation sample after handing back control.
+            self.waypoint.last_stamp = None
+        return True, 'Accepted'
+
+    def _expire_operator(self, now):
+        if (self.operator_session and self.operator_intent != 'HOLD'
+                and self.operator_stamp is not None
+                and now - self.operator_stamp > self.lease_timeout_sec):
+            self.operator_intent = 'HOLD'
+            self.operator_expired = True
+            self.lease_state = LEASE_HOLD
+            self.manual.update(0, 0, now)
 
     # Inputs
 
@@ -158,6 +213,8 @@ class ControlArbitration:
 
         Does not acquire the lease; only boat/cmd/control_mode does.
         """
+        if self.operator_session:
+            return False
         clean = sanitize_thrust(left, right)
         if clean is None:
             self.rejected_manual += 1
@@ -194,10 +251,16 @@ class ControlArbitration:
             return False
         self.failsafe_level = level
         self.failsafe_level_stamp = now
+        self.failsafe_stale = False
         return True
 
     def on_estop(self, active):
         self.estopped = bool(active)
+        if active:
+            self.lease_state = LEASE_HOLD
+            self.operator_intent = 'HOLD'
+            self.operator_expired = True
+            self.manual.last_stamp = None
 
     def on_control_mode(self, command, now):
         """Handle boat/cmd/control_mode. Returns True if understood.
@@ -206,6 +269,9 @@ class ControlArbitration:
         200 ms while the operator holds the lease.
         """
         if command not in VALID_COMMANDS:
+            return False
+        # A legacy heartbeat must not override the sequenced dashboard owner.
+        if self.operator_session:
             return False
         if command == CMD_MANUAL:
             self.lease_state = LEASE_HELD
@@ -230,25 +296,31 @@ class ControlArbitration:
             self.lease_expiries += 1
 
     def _expire_failsafe_if_stale(self, now):
-        """Forget the failsafe level if safety_monitor has gone quiet (fail open)."""
-        if self.failsafe_level == FAILSAFE_NOMINAL:
-            return
-        if (self.failsafe_level_stamp is None
-                or (now - self.failsafe_level_stamp) > self.failsafe_timeout_sec):
-            self.failsafe_level = FAILSAFE_NOMINAL
-            self.failsafe_level_stamp = None
+        """An established safety feed must not fail open when it disappears."""
+        if (not self.failsafe_stale and self.failsafe_level_stamp is not None
+                and (now - self.failsafe_level_stamp) > self.failsafe_timeout_sec):
+            self.failsafe_level = max(FAILSAFE_STOP_MIN, self.failsafe_level)
+            self.failsafe_stale = True
             self.failsafe_expiries += 1
 
     def evaluate(self, now):
         """Return (left, right, mode) for this tick.
 
-        Priority: estop > manual lease HELD > failsafe > HOLD > waypoint > zero
+        Priority: estop > HOLD > safety stop > manual > recovery > waypoint > zero
         """
+        self._expire_operator(now)
         self._expire_lease_if_stale(now)
         self._expire_failsafe_if_stale(now)
 
         if self.estopped:
             return 0.0, 0.0, MODE_ESTOP
+
+        # A user's Hold is a propulsion stop, including during RTL recovery.
+        if self.lease_state == LEASE_HOLD:
+            return 0.0, 0.0, MODE_HOLD
+
+        if self.failsafe_level >= FAILSAFE_STOP_MIN:
+            return 0.0, 0.0, MODE_FAILSAFE
 
         if self.lease_state == LEASE_HELD:
             if self.manual.is_fresh(now, self.source_timeout_sec):
@@ -256,19 +328,13 @@ class ControlArbitration:
             # Lease alive but manual thrust gapped: zero, still MANUAL.
             return 0.0, 0.0, MODE_MANUAL
 
-        # Failsafe: above HOLD and waypoint.
-        if self.failsafe_level >= FAILSAFE_STOP_MIN:
-            # Stop levels: zero, and don't fall through to waypoints.
-            return 0.0, 0.0, MODE_FAILSAFE
+        # Recovery is below manual, but above the waypoint mission.
         if self.failsafe_level >= FAILSAFE_DRIVING_MIN:
             if self.failsafe.is_fresh(now, self.source_timeout_sec):
                 return self.failsafe.left, self.failsafe.right, MODE_FAILSAFE
             # Failsafe is driving but its thrust gapped: hold zero rather
             # than hand the boat back to the mission.
             return 0.0, 0.0, MODE_FAILSAFE
-
-        if self.lease_state == LEASE_HOLD:
-            return 0.0, 0.0, MODE_HOLD
 
         # LEASE_AUTO
         if self.waypoint.is_fresh(now, self.source_timeout_sec):
