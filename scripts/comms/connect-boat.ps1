@@ -2,6 +2,8 @@
    Does not change router settings, start propulsion, or disable host-key checks.
    Example: ./connect-boat.ps1 -BoatHost asv-pi.local -PiUser august
    Keep this terminal open. Ctrl+C closes the tunnel.
+   If the link drops, the tunnel is reopened automatically. With SSH keys set
+   up this needs no input; with a password you are asked again each time.
 #>
 [CmdletBinding()]
 param(
@@ -31,7 +33,8 @@ if ($DryRun) {
     return
 }
 $ssh = Get-Command ssh -CommandType Application -ErrorAction Stop
-& $ssh.Source @sshArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "SSH tunnel ended with code $LASTEXITCODE. Check the boat address, credentials, network, and whether local ports are already in use."
+while ($true) {
+    & $ssh.Source @sshArgs
+    Write-Warning "Tunnel closed (code $LASTEXITCODE). Reconnecting in 2 s. Ctrl+C to stop."
+    Start-Sleep -Seconds 2
 }
