@@ -367,10 +367,16 @@ class ControlArbitration:
             self.failsafe_stale = True
             self.failsafe_expiries += 1
 
+    def _recovery_may_drive(self, now):
+        return (self.operator_expired and self._supervisor_fresh(now)
+                and FAILSAFE_DRIVING_MIN <= self.failsafe_level < FAILSAFE_STOP_MIN)
+
     def evaluate(self, now):
         """Return (left, right, mode) for this tick.
 
-        Priority: estop > HOLD > safety stop > manual > recovery > waypoint > zero
+        Priority: estop > operator HOLD > safety stop > manual > recovery >
+        waypoint > zero. A HOLD the operator did not choose (expired lease,
+        lost link) does not block failsafe recovery.
         """
         self._expire_operator(now)
         self._expire_lease_if_stale(now)
@@ -379,8 +385,9 @@ class ControlArbitration:
         if self.estopped:
             return 0.0, 0.0, MODE_ESTOP
 
-        # A user's Hold is a propulsion stop, including during RTL recovery.
-        if self.lease_state == LEASE_HOLD:
+        # A Hold the operator chose stops propulsion, including during RTL.
+        # A Hold from an expired lease lets the failsafe drive the boat home.
+        if self.lease_state == LEASE_HOLD and not self._recovery_may_drive(now):
             return 0.0, 0.0, MODE_HOLD
 
         if (not self._supervisor_fresh(now) or self.failsafe_level >= 4 or

@@ -48,6 +48,14 @@ class HandoverTests(unittest.TestCase):
         self.assertIsNone(m.tick(109))
         self.assertIsNotNone(m.tick(111))
 
+    def test_operator_hold_blocks_return_to_launch(self):
+        a = ControlArbitration(require_supervisor=False)
+        command(a, 1, 'MANUAL', 0, thrust=50)
+        command(a, 2, 'HOLD', .1)
+        a.on_failsafe_level(2, .2)
+        a.on_failsafe_thrust(30, 30, .2)
+        self.assertEqual(a.evaluate(.2), (0, 0, 'HOLD'))
+
     def test_old_manual_packet_cannot_undo_hold_or_resume(self):
         a = ControlArbitration(require_supervisor=False)
         command(a, 1, 'MANUAL', 0, thrust=50)
@@ -65,11 +73,14 @@ class HandoverTests(unittest.TestCase):
             command(a, 1, 'HOLD', 0)
             command(a, 2, intent, .1, thrust=50)
             a.on_waypoint_thrust(60, 60, 2)
-            a.on_failsafe_level(2, 2)
-            a.on_failsafe_thrust(30, 30, 2)
             self.assertEqual(a.evaluate(2), (0, 0, 'HOLD'))
             self.assertFalse(command(a, 3, intent, 2, False, thrust=50)[0])
             self.assertEqual(a.evaluate(2), (0, 0, 'HOLD'))
+            # The lost link, not the operator, caused this Hold, so
+            # return-to-launch may still drive the boat home.
+            a.on_failsafe_level(2, 2)
+            a.on_failsafe_thrust(30, 30, 2)
+            self.assertEqual(a.evaluate(2), (30, 30, 'FAILSAFE'))
             self.assertTrue(command(a, 4, 'MANUAL', 2, thrust=10)[0])
             self.assertEqual(a.evaluate(2), (10, 10, 'MANUAL'))
 
