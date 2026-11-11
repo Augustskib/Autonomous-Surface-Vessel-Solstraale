@@ -1843,7 +1843,7 @@ DATA_PAGE = """
             <div style="padding:8px">
                 <p class="note">Data saves onboard while recording. Stop, then select a recording and save its name. Latest 100 shown; older folders remain on disk.</p>
                 <select id="saved_recordings" style="width:100%" aria-label="Saved recording"></select>
-                <input id="recording_name" maxlength="80" placeholder="Name, e.g. Lake test — morning" aria-label="Recording name">
+                <input id="recording_name" maxlength="80" placeholder="Name, e.g. Lake test, morning" aria-label="Recording name">
                 <button id="record_save" onclick="saveRecordingName()" disabled>Save Name</button>
                 <p id="recording_details" style="overflow-wrap:anywhere"></p>
                 <p id="recording_feedback" role="status"></p>
@@ -1888,7 +1888,7 @@ async function recordingRequest(url, body) {
     try {
         const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
         const result = await response.json();
-        output.textContent = response.ok ? 'Request sent — waiting for recorder confirmation. Finalizing a large run may take time.' : (result.error || 'Request failed');
+        output.textContent = response.ok ? 'Request sent, waiting for recorder confirmation. Finalizing a large run may take time.' : (result.error || 'Request failed');
     } catch (_) { output.textContent = 'Connection lost; check recorder status before retrying.'; }
 }
 function saveRecordingName() {
@@ -1945,7 +1945,7 @@ function startDataRun() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({site: site, purpose: purpose, source: source}),
     }).then((r) => r.json()).then((data) => {
-        document.getElementById('recording_feedback').textContent = data.status === 'queued' ? 'Start requested — wait for RECORDING and disk writing confirmation.' : (data.error || 'Start failed');
+        document.getElementById('recording_feedback').textContent = data.status === 'queued' ? 'Start requested, wait for RECORDING and disk writing confirmation.' : (data.error || 'Start failed');
     }).catch(() => { document.getElementById('recording_feedback').textContent = 'Connection lost; recording state is unknown. Check status before retrying.'; });
 }
 
@@ -2637,7 +2637,7 @@ def data_save_name():
     if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80
             or any(ord(c) < 32 for c in name)
             or not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,160}', run_id)):
-        return jsonify({'status': 'error', 'error': 'Valid recording ID and name (1–80 characters) required'}), 400
+        return jsonify({'status': 'error', 'error': 'Valid recording ID and name (1 to 80 characters) required'}), 400
     return _queue_data_command({'action': 'save_name', 'run_id': run_id, 'name': name.strip()})
 
 
