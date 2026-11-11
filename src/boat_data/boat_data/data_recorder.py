@@ -26,6 +26,7 @@ import math
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,8 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from boat_data.library import recording_library, name_recording
+from boat_data.library import (
+    name_recording, recording_library, repair_runs, write_checksums)
 
 from boat_data.write_watch import (
     DEFAULT_RATE_EMA_ALPHA,
@@ -190,8 +192,23 @@ class DataRecorder(Node):
 
         self.create_timer(1.0, self.publish_status)
 
+        # Close runs left open by a power loss. Hashing can take minutes, so
+        # it runs off the main thread.
+        if self.runs_dir.is_dir():
+            earlier = [p.name for p in self.runs_dir.iterdir() if p.is_dir()]
+            threading.Thread(target=self._repair_earlier_runs, args=(earlier,),
+                             daemon=True).start()
+
         self.get_logger().info(
             'Data recorder ready. Archive root: %s (not recording)' % self.data_root)
+
+    def _repair_earlier_runs(self, run_ids):
+        repaired = repair_runs(self.runs_dir, run_ids)
+        if repaired:
+            self.get_logger().warn(
+                'Closed %d recording(s) that ended without a clean stop: %s'
+                % (len(repaired), ', '.join(repaired)))
+            self._library_at = 0.0
 
     # Command handling
 
@@ -514,13 +531,7 @@ class DataRecorder(Node):
         tmp.replace(self.run_dir / 'manifest.json')
 
     def _write_checksums(self):
-        lines = []
-        for path in sorted(self.run_dir.rglob('*')):
-            if path.is_file() and path.name != 'checksums.sha256':
-                rel = path.relative_to(self.run_dir)
-                lines.append('%s  %s' % (sha256_of(path), rel))
-        (self.run_dir / 'checksums.sha256').write_text(
-            '\n'.join(lines) + '\n', encoding='utf-8')
+        write_checksums(self.run_dir)
 
     def _emit_event(self, payload):
         payload['t_utc'] = utc_now_iso()

@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import uuid
 
@@ -17,8 +18,11 @@ def verify_run(folder):
     manifest = json.loads((folder / 'manifest.json').read_text(encoding='utf-8'))
     if not manifest.get('ended_utc'):
         raise ValueError('Recording is not finalized')
+    checksums = folder / 'checksums.sha256'
+    if not checksums.is_file():
+        raise ValueError('Recording has no checksums; restart the recorder on the Pi to repair it')
     checked = set()
-    for line in (folder / 'checksums.sha256').read_text(encoding='utf-8').splitlines():
+    for line in checksums.read_text(encoding='utf-8').splitlines():
         digest, name = line.split('  ', 1)
         name = name.replace('\\', '/')
         rel = PurePosixPath(name)
@@ -32,7 +36,9 @@ def verify_run(folder):
         if h.hexdigest() != digest:
             raise ValueError('Checksum mismatch: ' + name)
         checked.add(name)
-    actual = {p.relative_to(folder).as_posix() for p in folder.rglob('*') if p.is_file() and p.name != 'checksums.sha256'}
+    actual = {p.relative_to(folder).as_posix() for p in folder.rglob('*')
+              if p.is_file() and p.name != 'checksums.sha256'
+              and p.relative_to(folder).parts[0] != 'derived'}
     if checked != actual or 'manifest.json' not in checked or not any(n.endswith('.mcap') for n in checked):
         raise ValueError('Missing checksums or no MCAP data')
     return manifest
@@ -60,11 +66,15 @@ def main():
     staging = root / ('.partial-' + uuid.uuid4().hex)
     staging.mkdir()
     remote = f'{args.user}@{args.host}:{args.remote_root.rstrip("/")}/{args.run_id}'
-    subprocess.run(['scp', '-r', remote, str(staging)], check=True)
-    copied = staging / args.run_id
-    manifest = verify_run(copied)
-    copied.rename(final)
-    staging.rmdir()
+    try:
+        subprocess.run(['scp', '-r', remote, str(staging)], check=True)
+        copied = staging / args.run_id
+        manifest = verify_run(copied)
+        copied.rename(final)
+    except (subprocess.CalledProcessError, ValueError, OSError) as exc:
+        raise SystemExit('Fetch failed, nothing was kept locally: %s' % exc)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     print('Verified recording: ' + str(final))
     print('Name: ' + str(manifest.get('display_name', '(unnamed)')))
     print('Import the MCAP files under bag/rosbag2 into Foxglove. Source remains on the Pi.')

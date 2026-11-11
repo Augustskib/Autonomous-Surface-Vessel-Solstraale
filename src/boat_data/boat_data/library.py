@@ -2,7 +2,67 @@
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def sha256_of(path, chunk=1024 * 1024):
+    h = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for block in iter(lambda: stream.read(chunk), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def write_checksums(run_dir):
+    """Hash every capture file. derived/ is rebuilt offline and not included."""
+    run_dir = Path(run_dir)
+    lines = []
+    for path in sorted(run_dir.rglob('*')):
+        rel = path.relative_to(run_dir)
+        if (path.is_file() and not path.is_symlink() and rel.parts[0] != 'derived'
+                and path.name not in ('checksums.sha256', 'checksums.sha256.tmp',
+                                      'manifest.json.tmp')):
+            lines.append('%s  %s' % (sha256_of(path), rel.as_posix()))
+    tmp = run_dir / 'checksums.sha256.tmp'
+    tmp.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    tmp.replace(run_dir / 'checksums.sha256')
+
+
+def repair_runs(root, run_ids):
+    """Finalize runs cut short by power loss or a killed recorder.
+
+    A run without an end time is closed and marked unexpected_exit. A run
+    without checksums gets them. Only the given run ids are touched, so a
+    run started after the caller listed them is never closed by mistake.
+    Returns the repaired run ids.
+    """
+    repaired = []
+    for run_id in run_ids:
+        folder = Path(root) / run_id
+        path = folder / 'manifest.json'
+        if not path.is_file() or path.is_symlink() or folder.is_symlink():
+            continue
+        try:
+            manifest = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(manifest, dict):
+                continue
+            changed = not manifest.get('ended_utc')
+            if changed:
+                manifest['ended_utc'] = datetime.now(timezone.utc).isoformat()
+                quality = manifest.get('quality')
+                if not isinstance(quality, dict):
+                    quality = manifest['quality'] = {}
+                quality['unexpected_exit'] = True
+                tmp = folder / 'manifest.json.tmp'
+                tmp.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+                tmp.replace(path)
+            if changed or not (folder / 'checksums.sha256').exists():
+                write_checksums(folder)
+                repaired.append(folder.name)
+        except (OSError, ValueError):
+            continue
+    return repaired
 
 
 def recording_library(root, active_id=None, limit=100):
@@ -34,7 +94,7 @@ def name_recording(root, run_id, name, active_id=None):
     if not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,160}', run_id):
         raise ValueError('Invalid recording ID')
     if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or any(ord(c) < 32 for c in name):
-        raise ValueError('Use a name of 1–80 characters without control characters')
+        raise ValueError('Use a name of 1 to 80 characters without control characters')
     root = Path(root).resolve()
     folder = root / run_id
     if folder.is_symlink() or folder.resolve().parent != root:
