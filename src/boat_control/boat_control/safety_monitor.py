@@ -571,8 +571,7 @@ class SafetyMonitor(Node):
 
         heartbeat_age = math.nan
         if self.last_heartbeat_time is not None:
-            heartbeat_age = round(
-                (self.get_clock().now() - self.last_heartbeat_time).nanoseconds / 1e9, 1)
+            heartbeat_age = round(self._now() - self.last_heartbeat_time, 1)
 
         tripped = bool(decision and decision.level > LEVEL_NOMINAL)
         reason = decision.reason if decision else ''
