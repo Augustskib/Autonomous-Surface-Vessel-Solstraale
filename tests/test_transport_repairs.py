@@ -96,6 +96,29 @@ class TransportRepairs(unittest.TestCase):
         obj.read_gps()
         obj.publisher_.publish.assert_not_called()
 
+    def test_unsynced_pi_clock_does_not_silence_gps(self):
+        obj, registry = self.gps(b'', seconds=5000)
+        published = 0
+        for tick in range(6):
+            sec = 100 + tick
+            registry['$GPGGA,t%d' % tick] = NS(timestamp=daytime(0, sec // 60, sec % 60),
+                gps_qual=1, latitude=28.0, longitude=20, altitude=0)
+            type(obj).read_gps.__globals__['time'] = NS(time=lambda s=5000 + tick: s)
+            data = b'$GPGGA,t%d\n' % tick
+            obj.ser = Mock(in_waiting=len(data))
+            obj.ser.read.return_value = data
+            obj.read_gps()
+            published = obj.publisher_.publish.call_count
+            if tick < 4:
+                self.assertEqual(published, 0)
+        self.assertEqual(published, 2)
+
+    def test_usb_drop_closes_port_instead_of_crashing(self):
+        obj, _ = self.gps(b'')
+        type(obj.ser).in_waiting = property(lambda self: (_ for _ in ()).throw(OSError('gone')))
+        obj.read_gps()
+        self.assertIsNone(obj.ser)
+
     def test_acquisition_age_is_preserved(self):
         obj, _ = self.gps(b'$GPGGA,new\n')
         obj.read_gps()

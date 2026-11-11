@@ -14,6 +14,10 @@ from sensor_msgs.msg import NavSatFix, NavSatStatus
 
 
 class GPSPublisher(Node):
+    CLOCK_SKEW_CONFIRM_FIXES = 5
+    _skew_ref = None
+    _skew_count = 0
+
     def __init__(self):
         super().__init__('gps_publisher')
 
@@ -42,9 +46,21 @@ class GPSPublisher(Node):
             self._rx_buf = b''
             self._discard_line = False
             self.get_logger().info(f'Opened GPS serial port {self.port} at {self.baud} baud')
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError) as e:
             self.get_logger().error(f'Failed to open serial port: {e}')
             self.ser = None
+
+    def _host_clock_is_skewed(self, age):
+        """True once several fixes in a row disagree with the host by the same
+        amount. A Pi without RTC or NTP has a wrong clock, and its fixes are
+        still live. A stale backlog arrives in a burst, so its ages differ.
+        """
+        if self._skew_ref is not None and abs(age - self._skew_ref) <= 0.75:
+            self._skew_count += 1
+        else:
+            self._skew_ref = age
+            self._skew_count = 1
+        return self._skew_count >= self.CLOCK_SKEW_CONFIRM_FIXES
 
     def read_gps(self):
         if self.ser is None:
@@ -67,7 +83,7 @@ class GPSPublisher(Node):
                 self.get_logger().warn('GPS backlog discarded; waiting for fresh fix')
                 return
             chunk = self.ser.read(count) if count else b''
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError) as e:
             self.get_logger().warn(f'Serial read error: {e}, will attempt to reopen port')
             try:
                 self.ser.close()
@@ -106,10 +122,17 @@ class GPSPublisher(Node):
                                + stamp.microsecond / 1e6)
                 age = (host_seconds - gps_seconds + 43200) % 86400 - 43200
                 if age < -0.5 or age > 2.0:
+                    if not self._host_clock_is_skewed(age):
+                        self.get_logger().warn(
+                            'GPS UTC timestamp is stale or ahead of host',
+                            throttle_duration_sec=5.0)
+                        continue
                     self.get_logger().warn(
-                        'GPS UTC timestamp is stale or ahead of host; check Pi clock synchronization',
-                        throttle_duration_sec=5.0)
-                    continue
+                        'Pi clock differs from GPS UTC by %.0f s; stamping fixes '
+                        'at receive time' % age, throttle_duration_sec=30.0)
+                    age = 0.0
+                else:
+                    self._skew_count = 0
                 quality = int(msg.gps_qual or 0)
                 lat, lon = float(msg.latitude), float(msg.longitude)
                 alt = float(msg.altitude or 0.0)
