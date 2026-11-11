@@ -149,8 +149,12 @@ class Regressions(unittest.TestCase):
     def test_bad_mission_does_not_enter_execute(self):
         mod=load('boat_control/boat_control/mission_manager.py',['MissionManager'])
         obj=instance(mod.MissionManager);obj.logic=Mock()
-        obj.mission_callback(NS(latitudes=[math.nan],longitudes=[-81.]))
+        obj.logic.manager_id='manager';obj.logic.generation=0
+        obj._publish_state=Mock()
+        obj.mission_callback(NS(execution_id='request',manager_id='manager',generation=0,
+                                latitudes=[math.nan],longitudes=[-81.]))
         obj.logic.request_mission.assert_not_called()
+        obj._publish_state.assert_called_once_with('request', False, 'Invalid waypoints')
 
     def test_json_arrays_do_not_crash_ros_command_handlers(self):
         for file,cls,method in [

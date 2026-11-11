@@ -1,0 +1,8 @@
+FROM asv-validation:jazzy
+SHELL ["/bin/bash", "-c"]
+RUN apt-get update && apt-get install -y --no-install-recommends git libboost-all-dev libpcl-dev && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/QuanergySystems/quanergy_client.git /opt/quanergy-src && git -C /opt/quanergy-src checkout 83d76e1675d14426f7d8c0dc34682bf8f5c75c29
+# SDK 5 predates the C++ standard required by modern Ubuntu PCL headers.
+RUN sed -i 's/CXX_STANDARD 11/CXX_STANDARD 17/g' /opt/quanergy-src/CMakeLists.txt && cmake -S /opt/quanergy-src -B /opt/quanergy-build -DCMAKE_INSTALL_PREFIX=/opt/quanergy -DNoViz=ON && cmake --build /opt/quanergy-build --target quanergy_client --parallel 2 && cmake --install /opt/quanergy-build
+COPY src/boat_lidar /ws/src/boat_lidar
+RUN source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && colcon build --packages-select boat_lidar --cmake-args -DASV_BUILD_QUANERGY=ON -DCMAKE_PREFIX_PATH=/opt/quanergy

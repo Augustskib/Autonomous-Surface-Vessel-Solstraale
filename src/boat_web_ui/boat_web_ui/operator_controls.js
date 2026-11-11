@@ -11,10 +11,17 @@ class OperatorControls {
         const seq = ++this.seq;
         this.pending = true;
         try {
-            const result = await this.post('/operator', {
-                session: this.session, seq, intent: this.intent, transition,
-                left: this.left, right: this.right,
-            });
+            const body = {session:this.session, seq, intent:this.intent, transition,
+                left:this.left, right:this.right, authority:this.ack?.authority};
+            if (transition && ['MANUAL','AUTO','RESET'].includes(body.intent)) {
+                const started = performance.now();
+                const prepared = await this.post('/operator/prepare', body);
+                if (revision !== this.revision) return false;
+                if (performance.now() - started >= 1000 || !prepared.operator?.ticket)
+                    throw new Error('Control preparation expired; choose the action again');
+                body.ticket = prepared.operator.ticket;
+            }
+            const result = await this.post('/operator', body);
             if (revision !== this.revision) return false;
             const ack = result.operator;
             if (!ack || ack.request_session !== this.session || ack.request_seq !== seq)
@@ -54,7 +61,8 @@ class OperatorControls {
     observe(status, age) {
         if (!this.confirmed || this.pending || !['MANUAL','AUTO'].includes(this.intent)) return;
         if (age == null || age > 1 || !status || status.session !== this.session
-                || status.expired || status.mode === 'ESTOP') {
+                || status.expired || status.mode === 'ESTOP'
+                || status.authority !== this.ack?.authority) {
             ++this.revision;
             this.intent = 'HOLD'; this.left = this.right = 0;
             this.confirmed = false; this.pending = false;
@@ -70,6 +78,7 @@ if (typeof document !== 'undefined') {
     function notifyOperator(message) {
         const el = document.getElementById('operator_notice');
         if (el) el.textContent = message;
+        if (typeof window.logOperatorEvent === 'function') window.logOperatorEvent(message);
     }
     async function postCommand(url, body) {
         const abort = new AbortController();

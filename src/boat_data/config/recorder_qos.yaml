@@ -1,0 +1,20 @@
+/boat/camera/image_raw:
+  reliability: best_effort
+  history: keep_last
+  depth: 10
+/boat/imu:
+  reliability: best_effort
+  history: keep_last
+  depth: 100
+/boat/gps/fix:
+  reliability: best_effort
+  history: keep_last
+  depth: 20
+/boat/lidar/points_raw:
+  reliability: best_effort
+  history: keep_last
+  depth: 5
+/tf_static:
+  reliability: reliable
+  durability: transient_local
+  history: keep_all

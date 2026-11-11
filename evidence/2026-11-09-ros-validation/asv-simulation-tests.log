@@ -1,0 +1,52 @@
+{"samples": {"gps": 98, "imu": 391, "camera": 116, "clock": 19457, "heading": 390, "thrust": 666}, "heading_qualities": [2], "idle_thrust_zero": true}
+ WSGI server instead.
+[web_server-10]  * Running on http://127.0.0.1:5000
+[web_server-10] Press CTRL+C to quit
+[safety_monitor-8] [INFO] [1794241162.954732254] [safety_monitor]: Launch point auto-set to the first valid fix: 28.543611, -81.372778. RETURN_TO_LAUNCH will steer here. Move it from the dashboard if the boat was powered on somewhere other than the launch site.
+[mission_manager-4] [INFO] [1794241163.221679304] [mission_manager]: INIT checks complete -> transitioning to IDLE
+[foxglove_bridge-11] [INFO] [1794241164.272015339] [foxglove_bridge]: Advertising new channel 36 for topic "/boat/nav_status"
+[foxglove_bridge-11] [INFO] [1794241164.272730915] [foxglove_bridge]: Advertising new channel 37 for topic "/boat/mission_geojson"
+[foxglove_bridge-11] [INFO] [1794241164.272854249] [foxglove_bridge]: Advertising new channel 38 for topic "/boat/data_command"
+[foxglove_bridge-11] [INFO] [1794241164.773564318] [foxglove_bridge]: Advertising new channel 39 for topic "/boat/recording_status"
+[foxglove_bridge-11] [INFO] [1794241164.774565115] [foxglove_bridge]: Advertising new channel 40 for topic "/boat/power_status"
+[foxglove_bridge-11] [INFO] [1794241164.774697446] [foxglove_bridge]: Advertising new channel 41 for topic "/boat/system_status"
+[foxglove_bridge-11] [INFO] [1794241164.774708677] [foxglove_bridge]: Advertising new channel 42 for topic "/boat/lidar/status"
+[foxglove_bridge-11] [INFO] [1794241164.775083357] [foxglove_bridge]: Advertising new channel 43 for topic "/boat/dock/marker_pose"
+[foxglove_bridge-11] [INFO] [1794241164.775149543] [foxglove_bridge]: Advertising new channel 44 for topic "/boat/dock/marker_detected"
+[foxglove_bridge-11] [INFO] [1794241164.775419264] [foxglove_bridge]: Advertising new channel 45 for topic "/boat/camera/status"
+[heading_estimator-5] [INFO] [1794241165.092073897] [heading_estimator]: Heading quality -> FUSED
+[waypoint_follower-6] [INFO] [1794241165.095153891] [waypoint_follower]: Heading quality is now 2
+[heading_estimator-5] [WARN] [1794241165.095886353] [heading_estimator]: boat/imu reports zero angular velocity while its orientation quaternion is changing -- deriving the yaw rate by differentiating the quaternion instead. That is noisier than reading the gyro directly; check whether the IMU driver is actually populating angular_velocity.
+[web_server-10] [INFO] [1794241165.317538835] [web_server]: Dock auto-set to first GPS fix: 28.543611, -81.372778
+[WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+[INFO] [foxglove_bridge-11]: sending signal 'SIGINT' to process[foxglove_bridge-11]
+[INFO] [web_server-10]: sending signal 'SIGINT' to process[web_server-10]
+[INFO] [detector_node-9]: sending signal 'SIGINT' to process[detector_node-9]
+[INFO] [safety_monitor-8]: sending signal 'SIGINT' to process[safety_monitor-8]
+[INFO] [control_arbiter-7]: sending signal 'SIGINT' to process[control_arbiter-7]
+[INFO] [waypoint_follower-6]: sending signal 'SIGINT' to process[waypoint_follower-6]
+[INFO] [heading_estimator-5]: sending signal 'SIGINT' to process[heading_estimator-5]
+[INFO] [mission_manager-4]: sending signal 'SIGINT' to process[mission_manager-4]
+[INFO] [thrust_splitter-3]: sending signal 'SIGINT' to process[thrust_splitter-3]
+[INFO] [parameter_bridge-2]: sending signal 'SIGINT' to process[parameter_bridge-2]
+[INFO] [gazebo-1]: sending signal 'SIGINT' to process[gazebo-1]
+[foxglove_bridge-11] [INFO] [1794241194.737966063] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[foxglove_bridge-11] [INFO] [1794241194.747390662] [foxglove_bridge]: Shutting down foxglove_bridge
+[foxglove_bridge-11] [2026-11-09T16:19:54Z INFO  foxglove::websocket::server] Shutting down
+[foxglove_bridge-11] [2026-11-09T16:19:54Z INFO  foxglove::websocket::server] Shutdown complete
+[foxglove_bridge-11] [INFO] [1794241194.747742609] [foxglove_bridge]: Shutdown complete
+[parameter_bridge-2] [INFO] [1794241194.773955773] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[INFO] [parameter_bridge-2]: process has finished cleanly [pid 51]
+[INFO] [foxglove_bridge-11]: process has finished cleanly [pid 61]
+[INFO] [thrust_splitter-3]: process has finished cleanly [pid 52]
+[INFO] [mission_manager-4]: process has finished cleanly [pid 54]
+[INFO] [heading_estimator-5]: process has finished cleanly [pid 55]
+[INFO] [safety_monitor-8]: process has finished cleanly [pid 58]
+[INFO] [waypoint_follower-6]: process has finished cleanly [pid 56]
+[INFO] [detector_node-9]: process has finished cleanly [pid 59]
+[INFO] [control_arbiter-7]: process has finished cleanly [pid 57]
+[INFO] [web_server-10]: process has finished cleanly [pid 60]
+[ERROR] [gazebo-1]: process[gazebo-1] failed to terminate '5' seconds after receiving 'SIGINT', escalating to 'SIGTERM'
+[INFO] [gazebo-1]: sending signal 'SIGTERM' to process[gazebo-1]
+[ERROR] [gazebo-1]: process has died [pid 50, exit code -15, cmd 'ruby /opt/ros/jazzy/opt/gz_tools_vendor/bin/gz sim -r -s /ws/install/boat_simulation/share/boat_simulation/worlds/boat_world.sdf --force-version 8'].
+

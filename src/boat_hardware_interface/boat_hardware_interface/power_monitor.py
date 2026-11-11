@@ -12,6 +12,7 @@ resistance (0.1 ohm is typical for these breakouts).
 """
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from boat_msgs.msg import PowerStatus, PowerChannel
 
@@ -147,11 +148,11 @@ def main(args=None):
     node = PowerMonitor()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

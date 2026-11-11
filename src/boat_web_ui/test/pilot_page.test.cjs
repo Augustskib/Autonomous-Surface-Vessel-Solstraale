@@ -13,14 +13,14 @@ function page() {
     const element=id=>{if(!els.has(id))els.set(id,{style:{},value:'',innerText:'',textContent:'',
         classList:{add(){},remove(){},toggle(){}},addEventListener(){},querySelector:()=>({style:{}})});return els.get(id);};
     let chain;chain=new Proxy(function(){},{get:(_,p)=>p==='then'?undefined:chain,apply:()=>chain});
-    const context={console,crypto:require('node:crypto').webcrypto,Uint8Array,AbortController,Blob,
+    const context={console,performance,crypto:require('node:crypto').webcrypto,Uint8Array,AbortController,Blob,
         document:{getElementById:element,querySelector:element,querySelectorAll:()=>[],
             addEventListener:(name,fn)=>events[name]=fn,hidden:false},
         navigator:{sendBeacon:(url,body)=>requests.push({url,body,beacon:true})},
         addEventListener:(name,fn)=>events[name]=fn,
         setInterval:fn=>{timers.push(fn);return timers.length;},clearInterval(){},
         setTimeout:()=>1,clearTimeout(){},L:chain,
-        fetch:(url,options)=>new Promise((resolve,reject)=>{
+        fetch:(url,options)=> url==='/operator/prepare' ? Promise.resolve({ok:true,json:async()=>({status:'ok',operator:{ticket:'test-ticket'}})}) : new Promise((resolve,reject)=>{
             requests.push({url,body:options?.body?JSON.parse(options.body):null,resolve,reject});
         })};
     context.window=context;vm.createContext(context);
@@ -32,6 +32,30 @@ function page() {
     return {c:context,requests,events,els,timers,ack};
 }
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('heading dial tracks clockwise headings and dims when no heading is available',()=>{
+    const p=page();
+    p.c.updateHeading({quality:2,heading_deg:90,source:'FUSED'},null);
+    assert.equal(p.els.get('compass_card').style.transform,'rotate(-90deg)');
+    assert.equal(p.els.get('compass_card').style.opacity,'1');
+    assert.equal(p.els.get('heading_val').innerText,'90.0°');
+    p.c.updateHeading({quality:0,heading_deg:0},null);
+    assert.equal(p.els.get('compass_card').style.opacity,'0.2');
+    assert.equal(p.els.get('heading_val').innerText,'--');
+    p.c.updateHeading({},270);
+    assert.equal(p.els.get('compass_card').style.transform,'rotate(-270deg)');
+    assert.equal(p.els.get('hdgq_val').innerText,'NO ESTIMATOR');
+});
+
+test('operator history is bounded and renders messages as plain text',()=>{
+    const p=page();
+    for(let i=0;i<100;i++)p.c.notifyOperator('event '+i);
+    p.c.notifyOperator('<img src=x onerror=unsafe()>');
+    const lines=p.els.get('operator_event_log').textContent.split('\n');
+    assert.equal(lines.length,80);
+    assert.match(lines[0],/<img src=x onerror=unsafe\(\)>/);
+    assert.doesNotMatch(lines.join('\n'),/event 0\n/);
+});
 test('both composed pages have valid JS and no blocking alert/prompt',()=>{
     for(const html of Object.values(pages))for(const s of scripts(html)){
         new vm.Script(s);assert.doesNotMatch(s,/\b(?:alert|prompt)\s*\(/);
@@ -45,7 +69,7 @@ test('actual Start Mission waits for Hold and mission acceptance before Auto',as
     const p=page();const run=p.c.startRoute([[60,5]]);
     let r=p.requests.at(-1);assert.equal(r.body.intent,'HOLD');p.ack(r);await flush();
     r=p.requests.at(-1);assert.equal(r.url,'/mission');
-    r.resolve({ok:true,json:async()=>({status:'ok'})});await flush();
+    r.resolve({ok:true,json:async()=>({status:'ok',execution_id:'test-run'})});await flush();
     r=p.requests.at(-1);assert.equal(r.body.intent,'AUTO');p.ack(r);
     assert.equal(await run,true);
 });
@@ -53,16 +77,16 @@ test('manual takeover while mission acceptance is pending prevents Auto',async()
     const p=page();const run=p.c.startRoute([[60,5]]);
     p.ack(p.requests.at(-1));await flush();
     const mission=p.requests.at(-1);assert.equal(mission.url,'/mission');
-    const take=p.c.acquireLease();p.ack(p.requests.at(-1));await take;
-    mission.resolve({ok:true,json:async()=>({status:'ok'})});
+    const take=p.c.acquireLease();await flush();p.ack(p.requests.at(-1));await take;
+    mission.resolve({ok:true,json:async()=>({status:'ok',execution_id:'test-run'})});
     assert.equal(await run,false);
     assert.equal(p.c.operator.intent,'MANUAL');
     assert.equal(p.requests.filter(r=>r.body?.intent==='AUTO').length,0);
 });
 test('actual Continue Mission has no trailing Hold from releasing Manual',async()=>{
     const p=page();vm.runInContext('missionActive=true',p.c);
-    let run=p.c.acquireLease();p.ack(p.requests.at(-1));await run;
-    run=p.c.resumeAuto();p.ack(p.requests.at(-1));await run;
+    let run=p.c.acquireLease();await flush();p.ack(p.requests.at(-1));await run;
+    run=p.c.resumeAuto();await flush();p.ack(p.requests.at(-1));await run;
     assert.deepEqual(p.requests.filter(r=>r.url==='/operator').map(r=>r.body.intent),['MANUAL','AUTO']);
 });
 test('a second route request cannot race the first accepted route',async()=>{
@@ -71,7 +95,7 @@ test('a second route request cannot race the first accepted route',async()=>{
     const mission=p.requests.at(-1);
     assert.equal(await p.c.startRoute([[61,6]]),false);
     assert.equal(p.requests.filter(r=>r.url==='/mission').length,1);
-    mission.resolve({ok:true,json:async()=>({status:'ok'})});await flush();
+    mission.resolve({ok:true,json:async()=>({status:'ok',execution_id:'test-run'})});await flush();
     p.ack(p.requests.at(-1));await run;
 });
 test('Cancel waits for in-flight mission acceptance and prevents Auto',async()=>{
@@ -80,16 +104,16 @@ test('Cancel waits for in-flight mission acceptance and prevents Auto',async()=>
     const mission=p.requests.at(-1);
     const cancel=p.c.cancelMission();p.ack(p.requests.at(-1));await flush();
     assert.equal(p.requests.filter(r=>r.url==='/mission/cancel').length,0);
-    mission.resolve({ok:true,json:async()=>({status:'ok'})});await flush();
+    mission.resolve({ok:true,json:async()=>({status:'ok',execution_id:'test-run'})});await flush();
     assert.equal(p.requests.at(-1).url,'/mission/cancel');
-    p.requests.at(-1).resolve({ok:true,json:async()=>({status:'ok'})});
+    p.requests.at(-1).resolve({ok:true,json:async()=>({status:'ok',execution_id:'test-run'})});
     await cancel;assert.equal(await run,false);
     assert.equal(p.requests.filter(r=>r.body?.intent==='AUTO').length,0);
 });
 test('WASD takes manual control, key release sends neutral, blur holds',async()=>{
     const p=page();
     p.events.keydown({key:'w',target:{closest:()=>false},preventDefault(){},repeat:false});
-    p.ack(p.requests.at(-1));await flush();
+    await flush();p.ack(p.requests.at(-1));await flush();
     p.c.updateThrust();let r=p.requests.at(-1);
     assert.equal(r.body.left,35);assert.equal(r.body.right,35);p.ack(r);await flush();
     p.events.keyup({key:'w'});p.c.updateThrust();r=p.requests.at(-1);

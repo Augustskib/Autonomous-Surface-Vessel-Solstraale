@@ -1,0 +1,42 @@
+/* Solstraale instrument console. Keep chart tiles and camera colors intact. */
+:root{--bg:#111514;--panel:#1d2321;--panel-hi:#272e2b;--line:#404a44;--txt:#d1d6cd;--dim:#a0ada2;--acc:#efab46;--grn:#90d595;--cyn:#95cda5;--red:#ef7470}
+body{background-image:none;font-size:12px}
+.topbar{background:#242b28;padding:7px 12px;gap:12px}
+.brand-txt b{color:var(--txt);letter-spacing:2px}.sysname{letter-spacing:2px}.mark{display:none}
+.nav{min-height:28px}.badge{background:#0b100d;letter-spacing:1px}
+.badge::before{content:'●';margin-right:6px;color:#647067}.badge.ok::before{color:var(--grn)}.badge.warn::before{color:var(--acc)}.badge.bad::before{color:var(--red)}
+.grid.console{display:grid;grid-template-columns:230px minmax(300px,1.35fr) minmax(280px,1fr);grid-template-rows:minmax(0,1fr) auto;gap:7px;padding:7px;overflow:auto}
+.instrument-stack{display:flex;flex-direction:column;gap:7px;min-height:0;overflow:auto}
+.chart-panel,.camera-panel{border:1px solid var(--line);padding:5px;background:var(--panel);box-shadow:inset 0 1px #566057,inset 0 -2px #090d0b;border-radius:3px;min-height:0}
+.chart-panel{grid-column:2;grid-row:1}.camera-panel{grid-column:3;grid-row:1}
+.hdr,.box-hdr{color:var(--txt);background:#202723;font-size:11px;letter-spacing:1.5px;padding:7px 8px;border-bottom:1px solid var(--line)}
+.hdr{align-items:center;flex-wrap:wrap;gap:5px}.hdr em{color:var(--dim);font-size:9px;letter-spacing:.4px}
+.pane{background:#070e09;border-color:#080b09}.leaflet-tile-pane{filter:none}
+img.pane{object-fit:contain;flex:1;min-height:80px}.camera-panel{overflow:auto}
+.box{background:#0b130e;border-radius:3px;box-shadow:inset 0 1px #4a554c}
+.kv{padding:5px 8px;border-color:#202c23}.kv>i,.kv-stack>i{letter-spacing:.5px;font-size:10px}.val{color:var(--grn);font-variant-numeric:tabular-nums}.val.sm{font-size:11px}
+.grn{color:var(--grn)}.amb{color:var(--acc)}.red{color:var(--red)}
+.note,.hint{color:var(--dim);font-size:10px;letter-spacing:.2px}.kv-stack{overflow-wrap:anywhere}
+.heading-instrument{position:relative;margin:8px auto;width:174px;height:174px;border:2px solid #57645a;border-radius:50%;background:#080f0a;overflow:hidden}
+.heading-instrument svg{width:100%;height:100%;color:var(--grn)}
+.heading-instrument #heading_val{position:absolute;inset:63px 40px auto;text-align:center;background:#080f0a;padding:5px 0;font-size:23px}
+.heading-instrument #compass_card{opacity:.2}
+.heading-instrument .index{position:absolute;top:1px;left:75px;color:var(--acc);font-size:20px}.heading-instrument .caption{position:absolute;bottom:44px;left:0;right:0;text-align:center;font-size:9px;color:var(--dim)}
+.command-deck{grid-column:1/-1;display:grid;grid-template-columns:minmax(260px,1fr) minmax(480px,2fr);gap:7px}
+.command-deck .btngrid{grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;padding:6px}.command-deck .authority .btngrid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.command-deck .kv{display:inline-flex;gap:12px}.command-deck .btn-estop,.command-deck .btn-clear{grid-column:auto}
+button{background:linear-gradient(#29312c,#1a211d);border:1px solid #536058;border-bottom:3px solid #090e0b;border-radius:2px;min-height:36px;font-size:10px;letter-spacing:.6px;box-shadow:inset 0 1px #39463b}
+button:hover{background:#344238;border-color:var(--acc)}button:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset:2px}button:disabled{opacity:.5;cursor:not-allowed}
+.btn-go,.btn-clear{color:var(--acc);border-color:#806237}.btn-estop{background:#762d29;color:#fff;border-color:#b55c50}.btn-estop:hover{background:#983a32}
+.eng-row{padding:5px 7px;margin:0}.eng-num{color:var(--grn)}.bar-container{height:18px;background:repeating-linear-gradient(90deg,#0a110c 0 9%,#2b3b2e 9% 10%)}.bar-center{background:#d4decf;z-index:1}.hint{padding:5px 7px}
+.strip{padding-top:6px}.mission-banner{color:var(--grn);background:#09120c;white-space:normal;font-size:10px}
+.event-panel{margin-top:7px}.event-panel small{float:right;font-size:9px;color:var(--dim);letter-spacing:.3px}#operator_event_log{height:110px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:8px;color:var(--grn);font:11px/1.6 Consolas,monospace}
+.thrust-limit{display:flex;justify-content:space-between;padding:7px;color:var(--dim);font-size:10px;border-top:1px solid var(--line)}.thrust-limit b{color:var(--acc)}
+.banner{font-size:12px;letter-spacing:1px;padding:7px 12px}.banner.bad{animation:none}.banner .b-why{font-size:11px;letter-spacing:.3px}
+.console-details{flex-shrink:0;margin:0 7px 7px;border:1px solid var(--line);background:var(--panel);max-height:40vh;overflow:auto}.console-details summary{padding:8px;color:var(--acc);cursor:pointer;font-size:11px;letter-spacing:1px}.detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:6px}
+.wp.active{animation:none}.wp>i.c{border-width:1px}.wp>b{font-size:11px}.leaflet-control-attribution{color:#ddd!important}.leaflet-control-attribution a{color:#c5e0d0!important}
+.console .operator-note{padding:4px 8px;font-size:10px;color:var(--dim)}
+@media(min-width:761px) and (max-height:800px){.camera-panel #operator_event_log{height:65px}.hdr{padding:4px}.instrument-stack .kv{padding:3px 7px}.heading-instrument{width:134px;height:134px}.heading-instrument #heading_val{inset:47px 30px auto;font-size:19px}.heading-instrument .index{left:55px}.heading-instrument .caption{bottom:31px}.heading-instrument svg{display:block}}
+@media(max-width:1050px){.grid.console{grid-template-columns:200px minmax(250px,1fr) minmax(240px,1fr)}.command-deck{grid-template-columns:1fr 1.6fr}.detail-grid{grid-template-columns:1fr 1fr}.sysname{display:none}}
+@media(max-width:760px){body{overflow:auto;height:auto;min-height:100%}.grid.console{display:flex;flex-direction:column;overflow:visible}.instrument-stack{display:grid;grid-template-columns:1fr 1fr;overflow:visible;order:2}.chart-panel{min-height:400px;order:0}.camera-panel{min-height:310px;order:1}.command-deck{position:relative;order:3;grid-template-columns:1fr}.console-details{max-height:none}.detail-grid{grid-template-columns:1fr}.topbar{flex-wrap:wrap}.badges{margin-left:0}.heading-instrument{width:174px}.command-deck .btngrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}

@@ -1,9 +1,11 @@
 """Bring up the full stack on the boat (Raspberry Pi).
 
-    ros2 launch boat_bringup boat_bringup.launch.py
-    ros2 launch boat_bringup boat_bringup.launch.py max_thrust_pct:=50
+    Supply geofence_center_lat, geofence_center_lon and geofence_radius_m
+    for the actual site. The launch intentionally has no simulation-site defaults.
 """
 
+from pathlib import Path
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -16,6 +18,9 @@ def generate_launch_description():
     # testing.
     max_thrust = ParameterValue(LaunchConfiguration('max_thrust_pct'), value_type=float)
     return LaunchDescription([
+        DeclareLaunchArgument('geofence_center_lat', description='Measured launch-site latitude'),
+        DeclareLaunchArgument('geofence_center_lon', description='Measured launch-site longitude'),
+        DeclareLaunchArgument('geofence_radius_m', description='Approved operating radius in metres'),
         DeclareLaunchArgument('max_thrust_pct', default_value='30.0',
                               description='Thrust cap in percent, 0-100'),
         Node(
@@ -116,6 +121,13 @@ def generate_launch_description():
             executable='safety_monitor',
             name='safety_monitor',
             output='screen',
+            parameters=[{key: ParameterValue(LaunchConfiguration(key), value_type=float)
+                         for key in ('geofence_center_lat', 'geofence_center_lon', 'geofence_radius_m')}],
+        ),
+        Node(
+            package='boat_data', executable='data_recorder', name='data_recorder',
+            output='screen', parameters=[{'min_free_gb': 5.0, 'stop_free_gb': 2.0,
+                'qos_overrides_path': str(Path(get_package_share_directory('boat_data')) / 'config' / 'recorder_qos.yaml')}],
         ),
         # Foxglove websocket on ws://<host>:8765.
         Node(
@@ -123,6 +135,7 @@ def generate_launch_description():
             executable='foxglove_bridge',
             name='foxglove_bridge',
             output='screen',
-            parameters=[{'port': 8765}],
+            parameters=[{'port': 8765, 'address': '127.0.0.1',
+                         'capabilities': ['connectionGraph']}],
         ),
     ])

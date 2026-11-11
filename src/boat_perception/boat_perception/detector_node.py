@@ -21,6 +21,7 @@ import time
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
@@ -156,8 +157,16 @@ class DetectorNode(Node):
                 throttle_duration_sec=5.0)
             return
 
-        results = self.model.predict(
-            frame, conf=self.confidence_threshold, verbose=False)[0]
+        try:
+            predictions = self.model.predict(
+                frame, conf=self.confidence_threshold, verbose=False)
+            if not predictions:
+                return
+            results = predictions[0]
+        except Exception as exc:  # model/runtime failures must not kill the node
+            self.get_logger().error(
+                f'Detection inference failed: {exc}', throttle_duration_sec=5.0)
+            return
 
         boxes = []
         for box in results.boxes:
@@ -203,11 +212,11 @@ def main(args=None):
     node = DetectorNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

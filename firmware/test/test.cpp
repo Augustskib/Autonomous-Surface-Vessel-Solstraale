@@ -22,5 +22,25 @@ int main(){
  assert(Serial.output.find("WDT:1 L:0 R:0")!=std::string::npos);
  assert(Serial.output.find("AZ:1.0000")!=std::string::npos);
 
+ // Malformed frames must neither apply thrust nor feed the watchdog.
+ handleLine("L:0 R:0");
+ const unsigned long accepted = lastCommandMillis;
+ nowMs += 10;
+ const char *bad[] = {"L:20 R:20 junk", "L:999999999999 R:0",
+   "L:101 R:0", "L:0 R:-101", "L: R:0", "L:1R:2", "L:1 R:2\rjunk"};
+ for (const char *line : bad) {
+   handleLine(line);
+   assert(currentLeft == 0 && currentRight == 0);
+   assert(lastCommandMillis == accepted);
+ }
+ Serial.input=std::string(32,'X')+"L:100 R:100\n";readSerialCommands();
+ assert(currentLeft==0 && currentRight==0 && lastCommandMillis==accepted);
+ Serial.input=std::string("L:100 R:100")+char(0)+"junk\n";readSerialCommands();
+ assert(currentLeft==0 && currentRight==0 && lastCommandMillis==accepted);
+ Serial.input="L:-100 R:100\r\n";readSerialCommands();
+ assert(currentLeft==-100 && currentRight==100);
+ Serial.input="L:0 R:0\n";readSerialCommands();
+ assert(currentLeft==0 && currentRight==0);
+ puts("PASS: strict framing and bounded integers");
  puts("PASS: command, zero, reverse, stop ordering, watchdog, telemetry");
 }

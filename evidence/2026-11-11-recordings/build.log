@@ -1,0 +1,69 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.recheck
+#1 transferring dockerfile: 290B 0.0s done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for docker.io/library/asv-validation:jazzy
+#2 DONE 0.1s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 125B 0.0s done
+#3 DONE 0.1s
+
+#4 [internal] load build context
+#4 DONE 0.0s
+
+#5 [1/3] FROM docker.io/library/asv-validation:jazzy@sha256:b9fb14f7fd654a23f863df7e5505ce2790eb8effd6d5ea8262623997492b9813
+#5 resolve docker.io/library/asv-validation:jazzy@sha256:b9fb14f7fd654a23f863df7e5505ce2790eb8effd6d5ea8262623997492b9813 0.0s done
+#5 DONE 0.1s
+
+#4 [internal] load build context
+#4 transferring context: 14.69kB 1.4s done
+#4 DONE 1.5s
+
+#5 [1/3] FROM docker.io/library/asv-validation:jazzy@sha256:b9fb14f7fd654a23f863df7e5505ce2790eb8effd6d5ea8262623997492b9813
+#5 CACHED
+
+#6 [2/3] COPY . /ws
+#6 DONE 0.2s
+
+#7 [3/3] RUN source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --cmake-args -DASV_BUILD_QUANERGY=OFF
+#7 0.844 Starting >>> boat_msgs
+#7 0.856 Starting >>> boat_data
+#7 0.867 Starting >>> boat_description
+#7 1.370 Finished <<< boat_description [0.50s]
+#7 1.796 Finished <<< boat_msgs [0.95s]
+#7 1.798 Starting >>> boat_perception
+#7 1.808 Starting >>> boat_control
+#7 1.818 Starting >>> boat_hardware_interface
+#7 1.827 Starting >>> boat_navigation
+#7 1.839 Starting >>> boat_web_ui
+#7 3.787 Finished <<< boat_data [2.93s]
+#7 4.979 Finished <<< boat_perception [3.18s]
+#7 4.982 Starting >>> boat_lidar
+#7 5.007 Finished <<< boat_hardware_interface [3.19s]
+#7 5.045 Finished <<< boat_control [3.24s]
+#7 5.061 Finished <<< boat_navigation [3.23s]
+#7 5.074 Finished <<< boat_web_ui [3.23s]
+#7 5.077 Starting >>> boat_bringup
+#7 5.082 Starting >>> boat_simulation
+#7 5.153 Finished <<< boat_lidar [0.17s]
+#7 5.238 Finished <<< boat_simulation [0.16s]
+#7 5.760 Finished <<< boat_bringup [0.68s]
+#7 5.779 
+#7 5.779 Summary: 11 packages finished [5.09s]
+#7 DONE 5.9s
+
+#8 exporting to image
+#8 exporting layers
+#8 exporting layers 0.3s done
+#8 exporting manifest sha256:29d990838b718331a8861d12496343c0f2f6a03f5e262710cc10e415913a1ee0 0.0s done
+#8 exporting config sha256:812e9dc58fa3f2ee940c42efd300e0c08dc3ba05b4559b204008d92b12ce1a8c 0.0s done
+#8 exporting attestation manifest sha256:4c0b726003db7d37fcc2e65abbcb3f6f03c5a73506301e0b80a70e8b9b428c20 0.0s done
+#8 exporting manifest list sha256:c515a18ba12104b9f0c6ace5c1ccd2113edd211023cf7f0c9fea27303d175c37
+#8 exporting manifest list sha256:c515a18ba12104b9f0c6ace5c1ccd2113edd211023cf7f0c9fea27303d175c37 0.0s done
+#8 naming to docker.io/library/asv-validation:recordings done
+#8 unpacking to docker.io/library/asv-validation:recordings
+#8 unpacking to docker.io/library/asv-validation:recordings 0.4s done
+#8 DONE 0.9s

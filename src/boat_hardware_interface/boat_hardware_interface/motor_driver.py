@@ -6,12 +6,14 @@ firmware/boat_motor_controller for the protocol.
 """
 
 import math
+import json
 import re
 
 import serial
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from sensor_msgs.msg import Imu
 from boat_msgs.msg import ThrustCommand
 
@@ -79,12 +81,15 @@ class MotorDriver(Node):
 
         # IMU relayed from the Arduino (Modulino Movement on its Qwiic port).
         self.imu_pub = self.create_publisher(Imu, 'boat/imu', 10)
+        self.motor_status_pub = self.create_publisher(String, 'boat/motor/status', 10)
         self._imu_roll = 0.0
         self._imu_pitch = 0.0
         self._imu_yaw = 0.0
         self._imu_last_time = None
         self._serial_rx_buf = b''
 
+        self._link_needs_reset = False
+        self._reset_stop_seen = False
         self.ser = None
         self._last_reconnect_attempt = None
         if not self.mock:
@@ -106,17 +111,25 @@ class MotorDriver(Node):
 
     # Serial
 
+    def _latch_link_fault(self):
+        self._link_needs_reset = True
+        self._reset_stop_seen = False
+        self.estop_active = True
+        self.last_command_time = None
+        self._imu_last_time = None
+
     def _open_serial(self):
         try:
             self.ser = serial.Serial(self.port, self.baud, timeout=0, write_timeout=0.1, exclusive=True)
             self._serial_rx_buf = b''
+            self._write_serial(0.0, 0.0)
             self.get_logger().info(f'Opened motor controller serial port {self.port}')
         except serial.SerialException as e:
+            self._latch_link_fault()
             self.get_logger().error(
                 f'Failed to open motor controller serial port {self.port}: {e} '
                 f'-- will retry every {RECONNECT_PERIOD_SEC:.0f}s. Commands will '
-                f'be accepted and clamped but NOT sent to any motor until this '
-                f'succeeds.')
+                f'be blocked until reconnection followed by STOP and RESET.')
             self.ser = None
 
     def _maybe_reconnect(self):
@@ -132,8 +145,11 @@ class MotorDriver(Node):
             return
         line = f'L:{int(round(left))} R:{int(round(right))}\n'
         try:
-            self.ser.write(line.encode('ascii'))
+            payload = line.encode('ascii')
+            if self.ser.write(payload) != len(payload):
+                raise serial.SerialException('Incomplete motor command write')
         except serial.SerialException as e:
+            self._latch_link_fault()
             self.get_logger().warn(
                 f'Serial write to motor controller failed: {e} -- '
                 f'closing port, will attempt to reopen')
@@ -146,6 +162,15 @@ class MotorDriver(Node):
     # ROS callbacks
 
     def estop_callback(self, msg):
+        if self._link_needs_reset:
+            if msg.data and self.ser is not None:
+                self._reset_stop_seen = True
+            elif not msg.data:
+                if self.ser is None or not self._reset_stop_seen:
+                    self.get_logger().warn('Motor link fault: reconnect, press STOP, then RESET')
+                    return
+                self._link_needs_reset = False
+                self._reset_stop_seen = False
         self.estop_active = msg.data
         if self.estop_active:
             self.get_logger().warn('E-stop active -> forcing stop')
@@ -212,6 +237,7 @@ class MotorDriver(Node):
                     self._serial_rx_buf = b''
                     self.get_logger().warn('Discarded oversized serial telemetry line')
         except serial.SerialException as e:
+            self._latch_link_fault()
             self.get_logger().warn(
                 f'Serial read from motor controller failed: {e} -- '
                 f'closing port, will attempt to reopen')
@@ -228,7 +254,25 @@ class MotorDriver(Node):
             return
         if line.startswith('IMU '):
             self._handle_imu_line(line)
-        # STATUS lines are ignored for now. Current comes from power_monitor.
+        elif line.startswith('STATUS '):
+            fields = {}
+            try:
+                for item in line.split()[1:]:
+                    key, value = item.split(':', 1)
+                    fields[key] = int(value)
+                if not {'L_IS','R_IS','WDT','L','R'}.issubset(fields):
+                    return
+                if fields['WDT'] not in (0,1) or any(abs(fields[k]) > 100 for k in ('L','R')):
+                    return
+            except (ValueError, TypeError):
+                return
+            self.motor_status_pub.publish(String(data=json.dumps({
+                'received_ns': self.get_clock().now().nanoseconds,
+                'time_basis': 'host_receive',
+                'reported_left_pct': fields['L'], 'reported_right_pct': fields['R'],
+                'watchdog_tripped': bool(fields['WDT']),
+                'left_current_raw': fields['L_IS'], 'right_current_raw': fields['R_IS'],
+                'current_units': 'adc_counts_not_amps'})))
 
     def _handle_imu_line(self, line):
         match = IMU_LINE_RE.match(line)
@@ -277,11 +321,11 @@ class MotorDriver(Node):
         # Derived orientation, so a loose covariance. Not measured.
         msg.orientation_covariance = [0.05, 0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.3]
         msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = gx, gy, gz
-        msg.angular_velocity_covariance = [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        msg.angular_velocity_covariance = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         msg.linear_acceleration.x = ax * GRAVITY_MPS2
         msg.linear_acceleration.y = ay * GRAVITY_MPS2
         msg.linear_acceleration.z = az * GRAVITY_MPS2
-        msg.linear_acceleration_covariance = [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        msg.linear_acceleration_covariance = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.imu_pub.publish(msg)
 
     def destroy_node(self):
@@ -299,11 +343,11 @@ def main(args=None):
     node = MotorDriver()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

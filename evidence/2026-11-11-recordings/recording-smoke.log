@@ -1,0 +1,19 @@
+[INFO] [1794408677.444318277] [data_recorder]: Data recorder ready. Archive root: /tmp/tmpcveytf51 (not recording)
+[INFO] [1794408677.445803306] [data_recorder]: 935.0 GB free; remaining duration requires measured camera/LiDAR write rate.
+[INFO] [1794408677.448130957] [data_recorder]: Starting recording: 20261111T145117Z_validation_run001
+stdin is not a terminal device. Keyboard handling disabled.[INFO] [1794408677.870177079] [rosbag2_recorder]: Press SPACE for pausing/resuming
+[INFO] [1794408677.870211667] [rosbag2_recorder]: Event publisher thread: Started
+[INFO] [1794408677.878464497] [rosbag2_recorder]: Starting recording to '/tmp/tmpcveytf51/runs/20261111T145117Z_validation_run001/bag/rosbag2'
+[INFO] [1794408677.884262799] [rosbag2_recorder]: Listening for topics...
+[INFO] [1794408677.884336076] [rosbag2_recorder]: Recording...
+[INFO] [1794408677.884336706] [rosbag2_recorder]: Topics discovery started.
+[INFO] [1794408677.971381514] [rosbag2_recorder]: Subscribed to topic '/boat/data_events'
+[INFO] [1794408677.971454111] [rosbag2_recorder]: All requested topics are subscribed. Stopping discovery...
+[INFO] [1794408677.971461232] [rosbag2_recorder]: Topics discovery stopped.
+[INFO] [1794408685.528164272] [data_recorder]: Stopping recording: 20261111T145117Z_validation_run001
+[INFO] [1794408685.528837969] [rosbag2_recorder]: Pausing recording.
+[INFO] [1794408685.528957419] [rosbag2_cpp]: Writing remaining messages from cache to the bag. It may take a while
+[INFO] [1794408685.530218986] [rosbag2_recorder]: Recording stopped
+[INFO] [1794408685.533060699] [rosbag2_recorder]: Event publisher thread: Exited
+[INFO] [1794408685.745793294] [data_recorder]: Run archived: /tmp/tmpcveytf51/runs/20261111T145117Z_validation_run001 (9s)
+PASS: real ROS MCAP start, write, stop, persistent name and capture checksums

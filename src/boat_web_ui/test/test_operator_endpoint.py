@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+import uuid
 from types import SimpleNamespace as Obj
 import unittest
 
@@ -31,8 +32,8 @@ def methods(path, names, ns, class_name=None):
 class EndpointTests(unittest.TestCase):
     def setUp(self):
         self.body = dict(session='pilot', seq=1, intent='MANUAL', transition=True, left=90, right=-90)
-        self.ns = dict(json=json, math=math, time=time, String=Obj,
-            request=Obj(get_json=lambda **kw: self.body), jsonify=lambda **kw: kw,
+        self.ns = dict(json=json, math=math, time=time, uuid=uuid, String=Obj,
+            request=Obj(path='/operator', get_json=lambda **kw: self.body), jsonify=lambda **kw: kw,
             telemetry_lock=threading.Lock(), operator_receipts={},
             latest_operator={}, latest_operator_time=None, _await=lambda p: p())
         web = SRC / 'boat_web_ui/boat_web_ui/web_server.py'
@@ -42,6 +43,7 @@ class EndpointTests(unittest.TestCase):
         methods(SRC / 'boat_control/boat_control/control_arbiter.py',
                 ['_operator_callback', '_publish_operator_status'], arb_ns, 'ControlArbiter')
         self.arb = Obj(logic=ControlArbitration(), _now=lambda: time.monotonic())
+        self.arb.logic.on_failsafe_level(0, time.monotonic())
         self.arb.operator_pub = Obj(publish=lambda msg: self.ns['operator_callback'](None, msg))
         self.estops = []
         self.arb.estop_pub = Obj(publish=lambda msg: self.estops.append(msg.data))
@@ -50,7 +52,19 @@ class EndpointTests(unittest.TestCase):
             operator_pub=Obj(publish=lambda msg: arb_ns['_operator_callback'](self.arb, msg)))
 
     def call(self):
+        if isinstance(self.body, dict) and self.body.get('intent') in ('MANUAL','AUTO','RESET'):
+            prepared = dict(self.body)
+            for k in ('left','right'):
+                if isinstance(prepared.get(k), (int,float)) and math.isfinite(prepared[k]):
+                    prepared[k] = max(-35, min(35, float(prepared[k])))
+            self.body['ticket'] = self.arb.logic.prepare_transition(prepared, time.monotonic()) or ''
         return self.ns['operator_command']()
+
+    def test_legacy_endpoint_cannot_report_false_success(self):
+        methods(SRC / 'boat_web_ui/boat_web_ui/web_server.py', ['legacy_control'], self.ns)
+        reply, code = self.ns['legacy_control']()
+        self.assertEqual(code, 410)
+        self.assertEqual(reply['status'], 'error')
 
     def test_acknowledged_command_is_clamped_and_reaches_arbiter(self):
         reply, code = self.call()
@@ -87,6 +101,28 @@ class EndpointTests(unittest.TestCase):
         self.body.update(seq=2, intent='RESET')
         self.assertEqual(self.call()[1], 200)
         self.assertEqual(self.estops, [True, False])
+        self.assertEqual(self.arb.logic.evaluate(time.monotonic()), (0, 0, 'HOLD'))
+
+    def test_cached_receipt_cannot_confirm_a_new_transport_attempt(self):
+        self.assertEqual(self.call()[1], 200)
+        self.ns['ros_node'].operator_pub.publish = lambda msg: None
+        self.assertEqual(self.call()[1], 504)
+
+    def test_reusing_sequence_with_changed_payload_is_rejected(self):
+        self.assertEqual(self.call()[1], 200)
+        self.body['left'] = -10
+        self.assertEqual(self.call()[1], 409)
+
+    def test_non_object_json_is_a_client_error(self):
+        for value in (None, [], [1], 'command', 123, True):
+            self.body = value
+            self.assertEqual(self.call()[1], 400)
+
+    def test_prepare_endpoint_returns_arbiter_ticket_without_motion(self):
+        self.ns['request'].path = '/operator/prepare'
+        reply, code = self.call()
+        self.assertEqual(code, 200)
+        self.assertTrue(reply['operator']['ticket'])
         self.assertEqual(self.arb.logic.evaluate(time.monotonic()), (0, 0, 'HOLD'))
 
 

@@ -5,9 +5,12 @@ motor_driver does this job on the real boat.
 """
 
 import math
+import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from std_msgs.msg import Float64, Bool
 from boat_msgs.msg import ThrustCommand
 
@@ -53,7 +56,8 @@ class ThrustSplitter(Node):
         self.current_left = 0.0
         self.current_right = 0.0
 
-        self.watchdog_timer = self.create_timer(0.1, self.check_watchdog)
+        self.watchdog_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.watchdog_timer = self.create_timer(0.1, self.check_watchdog, clock=self.watchdog_clock)
         self.ramp_timer = self.create_timer(RAMP_PERIOD_SEC, self._ramp_step)
 
         self.get_logger().info(
@@ -61,7 +65,7 @@ class ThrustSplitter(Node):
             'percent -> ramped per-propeller Newtons for Gazebo Thruster plugins)')
 
     def thrust_callback(self, msg: ThrustCommand):
-        self.last_command_time = self.get_clock().now()
+        self.last_command_time = time.monotonic()
         self._stopped_logged = False
 
         if self.estop_active:
@@ -77,6 +81,12 @@ class ThrustSplitter(Node):
             self.get_logger().error('Non-finite thrust command -> forcing stop')
             return
         max_thrust_n = float(self.get_parameter('max_thrust_n').value)
+        if not math.isfinite(max_thrust_n) or max_thrust_n < 0:
+            self.target_left = self.target_right = 0.0
+            self.current_left = self.current_right = 0.0
+            self._publish_forces(0.0, 0.0)
+            self.get_logger().error('Invalid max_thrust_n -> forcing stop')
+            return
         left = max(-100.0, min(100.0, msg.left)) / 100.0
         right = max(-100.0, min(100.0, msg.right)) / 100.0
         self.target_left = left * max_thrust_n
@@ -96,7 +106,7 @@ class ThrustSplitter(Node):
     def check_watchdog(self):
         if self.last_command_time is None or self._stopped_logged:
             return
-        elapsed = (self.get_clock().now() - self.last_command_time).nanoseconds / 1e9
+        elapsed = time.monotonic() - self.last_command_time
         if elapsed > COMMAND_TIMEOUT_SEC:
             self.get_logger().warn(
                 f'No thrust command received for {elapsed:.1f}s -> forcing stop')
@@ -132,11 +142,11 @@ def main(args=None):
     node = ThrustSplitter()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

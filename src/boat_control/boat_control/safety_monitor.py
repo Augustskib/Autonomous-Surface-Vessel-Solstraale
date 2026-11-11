@@ -8,8 +8,7 @@ Outputs:
   boat/failsafe_state    level and reason, for the dashboard and the bag
   boat/cmd/failsafe      thrust while a level is driving (RETURN_TO_LAUNCH),
                          a third input to control_arbiter
-  boat/mission_feedback  one MISSION_ABORTED on escalation, so the waypoint
-                         follower stops competing for the boat
+  Route execution is paused by arbitration during recovery, not cancelled.
 
 A geofence breach or link loss raises a failsafe level instead of the
 e-stop, so the boat can drive itself home and the operator can still drive.
@@ -31,9 +30,12 @@ a reason, which stays visible in SafetyStatus.fence_disabled_reason.
 
 import json
 import math
+import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from std_msgs.msg import Bool, Empty, String
 from sensor_msgs.msg import NavSatFix
 from boat_msgs.msg import (
@@ -116,10 +118,6 @@ class SafetyMonitor(Node):
         # Third arbiter input.
         self.failsafe_cmd_pub = self.create_publisher(
             ThrustCommand, 'boat/cmd/failsafe', 10)
-        # MISSION_ABORTED on the existing feedback topic; mission_manager
-        # moves to ABORTED.
-        self.feedback_pub = self.create_publisher(
-            String, 'boat/mission_feedback', 10)
         # Geofence changes are recorded in the bag too.
         self.events_pub = self.create_publisher(String, 'boat/data_events', 10)
 
@@ -148,15 +146,15 @@ class SafetyMonitor(Node):
         self._last_heading = None
         self._last_level = LEVEL_NOMINAL
         self._last_decision = None
-        self._abort_sent_for_level = LEVEL_NOMINAL
         self._launch_auto_captured = False
 
         launch = self._launch_from_params()
         if launch is not None:
             self.logic.set_launch_point(*launch)
 
-        self.create_timer(0.5, self.check)           # 2 Hz safety checks
-        self.create_timer(1.0, self.publish_status)  # 1 Hz status for the UI
+        self.watchdog_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.create_timer(0.5, self.check, clock=self.watchdog_clock)           # 2 Hz safety checks
+        self.create_timer(1.0, self.publish_status, clock=self.watchdog_clock)  # 1 Hz status for the UI
 
         fence = self.logic.fence
         self.get_logger().info(
@@ -195,21 +193,29 @@ class SafetyMonitor(Node):
             return None
         return (lat, lon)
 
+    @staticmethod
+    def _valid_coordinates(lat, lon):
+        return (math.isfinite(lat) and math.isfinite(lon)
+                and -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0)
+
+    def _has_fresh_fix(self):
+        return (self.current_fix is not None and self._last_fix_time is not None
+                and 0.0 <= self._now() - self._last_fix_time <= GPS_STALE_SEC)
+
     def _now(self):
-        return self.get_clock().now().nanoseconds / 1e9
+        return time.monotonic()
 
     # Subscriptions
 
     def gps_callback(self, msg: NavSatFix):
-        if msg.status.status < 0:  # STATUS_NO_FIX
+        # Bad fixes must invalidate the previous position immediately. Otherwise
+        # a set_here command can capture the old location until the next tick.
+        if (msg.status.status < 0
+                or not self._valid_coordinates(msg.latitude, msg.longitude)
+                or (msg.latitude == 0.0 and msg.longitude == 0.0)):
             self.current_fix = None
-            return
-        # Ignore (0, 0). GPS drivers emit it briefly before a real fix, and
-        # it used to trip the geofence at startup.
-        if msg.latitude == 0.0 and msg.longitude == 0.0:
-            self.get_logger().warn(
-                'Ignoring (0, 0) GPS fix -- treating as not-yet-valid',
-                throttle_duration_sec=10.0)
+            self._last_fix_time = None
+            self.logic.on_position_lost()
             return
         self._last_fix_time = self._now()
         self.current_fix = (msg.latitude, msg.longitude)
@@ -228,7 +234,7 @@ class SafetyMonitor(Node):
         self.boat_state = msg.data
 
     def heartbeat_callback(self, _msg: Empty):
-        self.last_heartbeat_time = self.get_clock().now()
+        self.last_heartbeat_time = self._now()
 
     def estop_callback(self, msg: Bool):
         self.logic.on_estop(bool(msg.data))
@@ -269,7 +275,7 @@ class SafetyMonitor(Node):
 
         if action in ('set', 'set_here'):
             if action == 'set_here':
-                if self.current_fix is None:
+                if not self._has_fresh_fix():
                     self.get_logger().error(
                         'geofence set_here refused: no valid GPS fix yet')
                     return True
@@ -279,8 +285,9 @@ class SafetyMonitor(Node):
                 lon = float(cmd.get('center_lon', p('geofence_center_lon').value))
             radius = float(cmd.get('radius_m', p('geofence_radius_m').value))
             warn = float(cmd.get('warn_fraction', p('geofence_warn_fraction').value))
-            if not (math.isfinite(lat) and math.isfinite(lon)
-                    and math.isfinite(radius) and radius > 1.0):
+            if not (self._valid_coordinates(lat, lon)
+                    and math.isfinite(radius) and radius > 1.0
+                    and math.isfinite(warn) and 0.0 < warn < 1.0):
                 self.get_logger().error(
                     'geofence set refused: non-finite or absurd values '
                     '(lat=%r lon=%r radius=%r)' % (lat, lon, radius))
@@ -336,7 +343,7 @@ class SafetyMonitor(Node):
 
         elif action in ('set_launch', 'set_launch_here'):
             if action == 'set_launch_here':
-                if self.current_fix is None:
+                if not self._has_fresh_fix():
                     self.get_logger().error(
                         'launch set_here refused: no valid GPS fix yet')
                     return True
@@ -344,7 +351,7 @@ class SafetyMonitor(Node):
             else:
                 lat = float(cmd.get('lat'))
                 lon = float(cmd.get('lon'))
-            if not (math.isfinite(lat) and math.isfinite(lon)):
+            if not self._valid_coordinates(lat, lon):
                 self.get_logger().error('launch point refused: non-finite')
                 return True
             set_params = [
@@ -407,7 +414,6 @@ class SafetyMonitor(Node):
         if ok:
             self.get_logger().info('Failsafe cleared by operator')
             self._emit_event({'event': 'failsafe_cleared'})
-            self._abort_sent_for_level = LEVEL_NOMINAL
         else:
             self.get_logger().warn('Failsafe clear refused: %s' % why)
 
@@ -432,14 +438,16 @@ class SafetyMonitor(Node):
 
         # Announce level changes
         if decision.level != self._last_level:
-            log = (self.get_logger().error if decision.level > LEVEL_NOMINAL
-                   else self.get_logger().info)
-            log('FAILSAFE %s -> %s (%s)%s'
+            message = ('FAILSAFE %s -> %s (%s)%s'
                 % (LEVEL_NAMES.get(self._last_level, '?'),
                    decision.level_name,
                    decision.reason or 'conditions clear',
                    (' [DEGRADED: %s]' % decision.degraded_reason)
                    if decision.degraded_reason else ''))
+            if decision.level > LEVEL_NOMINAL:
+                self.get_logger().error(message)
+            else:
+                self.get_logger().info(message)
             if decision.degraded_reason:
                 # Degradation also logged on its own at ERROR.
                 self.get_logger().error(
@@ -452,20 +460,9 @@ class SafetyMonitor(Node):
                               'degraded': decision.degraded_reason})
             self._last_level = decision.level
 
-        # Abort the running mission once per escalation, so the waypoint
-        # follower stops publishing while the failsafe drives.
-        if (actions_enabled
-                and decision.level > LEVEL_NOMINAL
-                and self._abort_sent_for_level == LEVEL_NOMINAL
-                and self.boat_state == STATE_EXECUTE):
-            self.feedback_pub.publish(String(
-                data='MISSION_ABORTED FAILSAFE_%s' % (decision.reason or 'UNKNOWN')))
-            self.get_logger().warn(
-                'Aborting the running mission because the failsafe escalated '
-                'to %s' % decision.level_name)
-            self._abort_sent_for_level = decision.level
-        elif decision.level == LEVEL_NOMINAL:
-            self._abort_sent_for_level = LEVEL_NOMINAL
+        # The arbiter pauses mission output during recovery. Retain the route
+        # for an explicit Continue after supervision is restored; emergency
+        # stop still aborts through mission_manager's stop subscription.
 
         # Drive if the level says to
         if actions_enabled and decision.commanding_thrust:
@@ -524,7 +521,7 @@ class SafetyMonitor(Node):
         if not self._gcs_armed or self.last_heartbeat_time is None:
             return False
 
-        age = (self.get_clock().now() - self.last_heartbeat_time).nanoseconds / 1e9
+        age = self._now() - self.last_heartbeat_time
         lost = age > float(self.get_parameter('gcs_timeout_sec').value)
 
         # Healthy link and no mission: disarm, so closing the browser while
@@ -538,6 +535,10 @@ class SafetyMonitor(Node):
     def _publish_failsafe_state(self, decision):
         msg = FailsafeState()
         msg.level = decision.level
+        # Only known navigation/link restrictions allow visual manual recovery.
+        # Future electrical/actuator faults must never be added to this allowlist.
+        msg.manual_recovery_allowed = (decision.level < 4 and decision.reason in (
+            '', 'GEOFENCE_BREACH', 'GCS_LINK_LOST', 'GCS_LINK_LOST_PROLONGED', 'LATCHED'))
         msg.level_name = decision.level_name
         msg.reason = decision.reason
         msg.active_reasons = list(decision.active_reasons)
@@ -629,11 +630,11 @@ def main(args=None):
     node = SafetyMonitor()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

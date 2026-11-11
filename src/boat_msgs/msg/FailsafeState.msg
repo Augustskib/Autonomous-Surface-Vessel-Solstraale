@@ -16,6 +16,7 @@ uint8 POWERED_STOP=3
 uint8 HARD_STOP=4
 
 uint8 level
+bool manual_recovery_allowed      # Explicit permission; unknown/physical faults must leave false.
 string level_name                 # e.g. "RETURN_TO_LAUNCH"
 
 # Condition that selected the level, e.g. "GEOFENCE_BREACH". Empty at NOMINAL.

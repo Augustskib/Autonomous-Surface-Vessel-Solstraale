@@ -14,6 +14,8 @@ def generate_launch_description():
         Node(package='boat_hardware_interface', executable='motor_driver',
              output='screen', parameters=[{'max_thrust_pct': 15.0, 'start_estopped': True}]),
         Node(package='boat_control', executable='control_arbiter', output='screen'),
+        Node(package='boat_control', executable='safety_monitor', output='screen',
+             parameters=[{'geofence_enabled': False}]),
         Node(package='boat_control', executable='mission_manager', output='screen'),
         Node(package='boat_web_ui', executable='web_server', output='screen',
              parameters=[{'manual_thrust_limit': 15.0}]),

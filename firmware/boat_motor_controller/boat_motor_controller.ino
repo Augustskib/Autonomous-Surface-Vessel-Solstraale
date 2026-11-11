@@ -62,6 +62,7 @@ const uint8_t MAX_LINE_LEN = 32;
 
 char lineBuf[MAX_LINE_LEN];
 uint8_t lineLen = 0;
+bool discardLine = false;
 unsigned long lastCommandMillis = 0;
 unsigned long lastStatusMillis = 0;
 bool watchdogTripped = true;  // stopped until the first valid command
@@ -104,29 +105,53 @@ void readSerialCommands() {
     char c = (char)Serial.read();
 
     if (c == '\n') {
-      lineBuf[lineLen] = '\0';
-      handleLine(lineBuf);
+      if (!discardLine) {
+        lineBuf[lineLen] = '\0';
+        handleLine(lineBuf);
+      }
+      lineLen = 0;
+      discardLine = false;
+      continue;
+    }
+    if (discardLine) continue;
+    if (c == '\0' || lineLen >= MAX_LINE_LEN - 1) {
+      // Never interpret the suffix of a malformed frame as a new command.
+      discardLine = true;
       lineLen = 0;
       continue;
     }
-    if (c == '\r') {
-      continue;
-    }
-    if (lineLen < MAX_LINE_LEN - 1) {
-      lineBuf[lineLen++] = c;
-    } else {
-      // Overlong line is noise. Drop it and resync on the next newline.
-      lineLen = 0;
-    }
+    lineBuf[lineLen++] = c;
   }
+}
+
+// Parse bounded decimal values without sscanf integer-overflow behavior.
+bool parseThrust(const char *&p, int &value) {
+  bool negative = (*p == '-');
+  if (negative) ++p;
+  if (*p < '0' || *p > '9') return false;
+  value = 0;
+  unsigned int digits = 0;
+  while (*p >= '0' && *p <= '9') {
+    if (++digits > 3) return false;
+    value = value * 10 + (*p++ - '0');
+  }
+  if (value > 100) return false;
+  if (negative) value = -value;
+  return true;
 }
 
 void handleLine(const char *line) {
   int left, right;
-  int parsed = sscanf(line, "L:%d R:%d", &left, &right);
-  if (parsed != 2) {
-    return;
-  }
+  const char *p = line;
+  if (*p++ != 'L') return;
+  if (*p++ != ':') return;
+  if (!parseThrust(p, left)) return;
+  if (*p++ != ' ') return;
+  if (*p++ != 'R') return;
+  if (*p++ != ':') return;
+  if (!parseThrust(p, right)) return;
+  if (*p == '\r') ++p;  // Allow CRLF, never embedded carriage returns.
+  if (*p != '\0') return;
 
   left = clampThrust(left);
   right = clampThrust(right);

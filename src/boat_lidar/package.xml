@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>boat_lidar</name><version>0.1.0</version>
+  <description>Opt-in ROS 2 adapter for Quanergy SDK 5, with explicit time provenance.</description>
+  <maintainer email="augustskib@users.noreply.github.com">August Ramberg</maintainer><license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend><depend>sensor_msgs</depend><depend>std_msgs</depend>
+  <depend>boost</depend><depend>pcl_conversions</depend><depend>libpcl-all-dev</depend>
+  <exec_depend>launch_ros</exec_depend><exec_depend>tf2_ros</exec_depend><exec_depend>boat_perception</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

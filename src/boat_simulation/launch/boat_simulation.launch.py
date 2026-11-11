@@ -59,12 +59,13 @@ def generate_launch_description():
             executable='heading_estimator',
             name='heading_estimator',
             output='screen',
-            parameters=[{'imu_orientation_is_absolute': True}],
+            parameters=[{'imu_orientation_is_absolute': True, 'use_sim_time': True}],
         ),
         Node(
             package='boat_navigation',
             executable='waypoint_follower',
             name='waypoint_follower',
+            parameters=[{'use_sim_time': True}],
             output='screen',
         ),
         # Sole publisher of boat/thrust_command.
@@ -104,6 +105,7 @@ def generate_launch_description():
             executable='foxglove_bridge',
             name='foxglove_bridge',
             output='screen',
-            parameters=[{'port': 8765}],
+            parameters=[{'port': 8765, 'address': '127.0.0.1',
+                         'capabilities': ['connectionGraph']}],
         ),
     ])

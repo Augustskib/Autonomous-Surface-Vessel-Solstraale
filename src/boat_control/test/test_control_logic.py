@@ -31,7 +31,7 @@ from boat_control.mission_state import (  # noqa: E402
 
 def test_neutral_manual_heartbeat_does_not_starve_waypoint():
     """Dashboard 0/0 heartbeats without a lease must not block autonomy."""
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     for _ in range(50):  # 10 seconds of browser heartbeats
         a.on_manual_thrust(0.0, 0.0, t)          # parked browser tab
@@ -43,7 +43,7 @@ def test_neutral_manual_heartbeat_does_not_starve_waypoint():
 
 
 def test_lease_makes_manual_win():
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
     a.on_manual_thrust(100.0, 100.0, t)
@@ -53,7 +53,7 @@ def test_lease_makes_manual_win():
 
 def test_neutral_while_lease_held_means_stop():
     """0/0 with the lease held is a real command, not an absence of one."""
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
     a.on_manual_thrust(0.0, 0.0, t)
@@ -65,7 +65,7 @@ def test_neutral_while_lease_held_means_stop():
 # Lease expiry must not resume autonomy
 
 def test_lease_expiry_latches_to_zero_and_does_not_resume_autonomy():
-    a = ControlArbitration(lease_timeout_sec=1.0)
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False, lease_timeout_sec=1.0)
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
     a.on_manual_thrust(80.0, 80.0, t)
@@ -91,7 +91,7 @@ def test_lease_expiry_latches_to_zero_and_does_not_resume_autonomy():
 
 
 def test_explicit_release_also_latches():
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
     a.on_manual_thrust(50.0, 50.0, t)
@@ -102,7 +102,7 @@ def test_explicit_release_also_latches():
 
 
 def test_estop_beats_everything_and_reset_stays_in_hold():
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
     a.on_manual_thrust(100.0, 100.0, t)
@@ -115,14 +115,14 @@ def test_estop_beats_everything_and_reset_stays_in_hold():
     assert a.evaluate(t)[2] == MODE_MANUAL
 
 
-def test_startup_is_auto_so_cli_missions_work_without_a_browser():
-    a = ControlArbitration()
+def test_explicit_legacy_fixture_starts_auto():
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     a.on_waypoint_thrust(60.0, 40.0, 0.0)
     assert a.evaluate(0.0)[2] == MODE_WAYPOINT
 
 
 def test_stale_sources_fall_to_zero():
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     a.on_waypoint_thrust(60.0, 40.0, 0.0)
     assert a.evaluate(5.0) == (0.0, 0.0, MODE_IDLE)
 
@@ -141,7 +141,7 @@ def test_sanitize_clamps():
 
 
 def test_nan_command_is_dropped_not_published():
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
     assert a.on_manual_thrust(float('nan'), 0.0, t) is False
@@ -177,9 +177,9 @@ def test_mission_complete_returns_to_idle():
     m = MissionStateMachine()
     m.finish_init()
     m.request_mission(2, 0.0)
-    changed, note = m.on_feedback('WAYPOINT_REACHED 0')
+    changed, note = m.on_feedback('WAYPOINT_REACHED 0', m.execution_id)
     assert not changed and note == 'progress'
-    changed, note = m.on_feedback('MISSION_COMPLETE')
+    changed, note = m.on_feedback('MISSION_COMPLETE', m.execution_id)
     assert changed and m.state == IDLE
     assert m.request_mission(4, 1.0)[0]
 
@@ -211,7 +211,7 @@ def test_full_operator_loop():
     """launch, ready, upload, drive, manual, release, resume, second route,
     with no restart. The follower is simulated as publishing waypoint thrust
     while the mission machine is in EXECUTE."""
-    a = ControlArbitration(lease_timeout_sec=1.0)
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False, lease_timeout_sec=1.0)
     m = MissionStateMachine()
     t = 0.0
     log = []
@@ -268,7 +268,7 @@ def test_full_operator_loop():
 
     # Mission 1 finishes. waypoint_follower publishes a final 0/0 before
     # going quiet.
-    changed, note = m.on_feedback('MISSION_COMPLETE')
+    changed, note = m.on_feedback('MISSION_COMPLETE', m.execution_id)
     assert changed and note == 'complete' and m.state == IDLE
     a.on_waypoint_thrust(0.0, 0.0, t)
     left, right, mode = step(follower_drives=False)

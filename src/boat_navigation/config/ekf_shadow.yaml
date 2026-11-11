@@ -1,0 +1,20 @@
+asv_ekf:
+  ros__parameters:
+    frequency: 20.0
+    sensor_timeout: 0.5
+    two_d_mode: true
+    publish_tf: false
+    print_diagnostics: true
+    map_frame: map
+    odom_frame: odom
+    world_frame: map
+    # Estimate antenna position; do not pretend yaw is observable or infer a
+    # body-origin lever-arm correction without absolute attitude.
+    base_link_frame: gps_frame
+    odom0: /boat/localization/gps_enu
+    odom0_config: [true, true, false, false, false, false, false, false, false, false, false, false, false, false, false]
+    odom0_queue_size: 5
+    imu0: /boat/localization/imu
+    imu0_config: [false, false, false, false, false, false, false, false, false, false, false, true, false, false, false]
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: false

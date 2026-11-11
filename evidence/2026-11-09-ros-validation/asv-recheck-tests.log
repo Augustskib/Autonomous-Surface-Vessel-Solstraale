@@ -1,0 +1,204 @@
+........................................................................ [ 33%]
+........................................................................ [ 66%]
+........................................................................ [100%]
+=============================== warnings summary ===============================
+src/boat_control/test/test_control_logic.py::test_full_operator_loop
+  Warning: Expected None, but src/boat_control/test/test_control_logic.py::test_full_operator_loop returned [(0.2, 'IDLE', 'IDLE', 0.0, 0.0), (0.4, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (0.6, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (0.8, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (1.0, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (1.2, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (1.4, 'EXECUTE', 'MANUAL', -100.0, 100.0), (1.6, 'EXECUTE', 'MANUAL', -100.0, 100.0), (1.8, 'EXECUTE', 'MANUAL', -100.0, 100.0), (2.0, 'EXECUTE', 'MANUAL', -100.0, 100.0), (2.2, 'EXECUTE', 'MANUAL', -100.0, 100.0), (2.4, 'EXECUTE', 'MANUAL', -100.0, 100.0), (2.6, 'EXECUTE', 'HOLD', 0.0, 0.0), (2.8, 'EXECUTE', 'HOLD', 0.0, 0.0), (3.0, 'EXECUTE', 'HOLD', 0.0, 0.0), (3.2, 'EXECUTE', 'HOLD', 0.0, 0.0), (3.4, 'EXECUTE', 'HOLD', 0.0, 0.0), (3.6, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (3.8, 'IDLE', 'WAYPOINT', 0.0, 0.0), (4.0, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (4.2, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (4.4, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (4.6, 'EXECUTE', 'WAYPOINT', 60.0, 40.0), (4.8, 'EXECUTE', 'WAYPOINT', 60.0, 40.0)], which will be an error in a future version of pytest.  Did you mean to use `assert` instead of `return`?
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+216 passed, 1 warning in 3.69s
+TAP version 13
+# Subtest: Manual -> Hold -> Auto is ordered with no trailing Release
+ok 1 - Manual -> Hold -> Auto is ordered with no trailing Release
+  ---
+  duration_ms: 17.90125
+  ...
+# Subtest: a late heartbeat response cannot undo a newer Hold
+ok 2 - a late heartbeat response cannot undo a newer Hold
+  ---
+  duration_ms: 2.355192
+  ...
+# Subtest: a failed control request stops renewal and requests Hold
+ok 3 - a failed control request stops renewal and requests Hold
+  ---
+  duration_ms: 3.108576
+  ...
+# Subtest: an old failed request cannot stop a newer manual takeover
+ok 4 - an old failed request cannot stop a newer manual takeover
+  ---
+  duration_ms: 2.157674
+  ...
+# Subtest: unmatched acknowledgement never confirms control
+ok 5 - unmatched acknowledgement never confirms control
+  ---
+  duration_ms: 2.522584
+  ...
+# Subtest: lost ownership or stale telemetry never silently resumes
+ok 6 - lost ownership or stale telemetry never silently resumes
+  ---
+  duration_ms: 3.755453
+  ...
+# Subtest: a superseded preparation never sends its drive command
+ok 7 - a superseded preparation never sends its drive command
+  ---
+  duration_ms: 1.335821
+  ...
+# Subtest: an expired preparation sends only a best-effort Hold
+ok 8 - an expired preparation sends only a best-effort Hold
+  ---
+  duration_ms: 1.750965
+  ...
+# Subtest: authority change in fresh telemetry stops renewals
+ok 9 - authority change in fresh telemetry stops renewals
+  ---
+  duration_ms: 3.686765
+  ...
+# Subtest: heading dial tracks clockwise headings and dims when no heading is available
+ok 10 - heading dial tracks clockwise headings and dims when no heading is available
+  ---
+  duration_ms: 20.681886
+  ...
+# Subtest: operator history is bounded and renders messages as plain text
+ok 11 - operator history is bounded and renders messages as plain text
+  ---
+  duration_ms: 23.899305
+  ...
+# Subtest: both composed pages have valid JS and no blocking alert/prompt
+ok 12 - both composed pages have valid JS and no blocking alert/prompt
+  ---
+  duration_ms: 2.882786
+  ...
+# Subtest: Pilot page initializes and closing a spectator sends no control
+ok 13 - Pilot page initializes and closing a spectator sends no control
+  ---
+  duration_ms: 4.413962
+  ...
+# Subtest: actual Start Mission waits for Hold and mission acceptance before Auto
+ok 14 - actual Start Mission waits for Hold and mission acceptance before Auto
+  ---
+  duration_ms: 23.525466
+  ...
+# Subtest: manual takeover while mission acceptance is pending prevents Auto
+ok 15 - manual takeover while mission acceptance is pending prevents Auto
+  ---
+  duration_ms: 7.641069
+  ...
+# Subtest: actual Continue Mission has no trailing Hold from releasing Manual
+ok 16 - actual Continue Mission has no trailing Hold from releasing Manual
+  ---
+  duration_ms: 7.874834
+  ...
+# Subtest: a second route request cannot race the first accepted route
+ok 17 - a second route request cannot race the first accepted route
+  ---
+  duration_ms: 9.48662
+  ...
+# Subtest: Cancel waits for in-flight mission acceptance and prevents Auto
+ok 18 - Cancel waits for in-flight mission acceptance and prevents Auto
+  ---
+  duration_ms: 8.319664
+  ...
+# Subtest: WASD takes manual control, key release sends neutral, blur holds
+ok 19 - WASD takes manual control, key release sends neutral, blur holds
+  ---
+  duration_ms: 8.154104
+  ...
+1..19
+# tests 19
+# suites 0
+# pass 19
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 433.192953
+Arguments (pass arguments as '<name>:=<value>'):
+
+    'gz_args':
+        Arguments to be passed to Gazebo Sim
+        (default: '')
+
+    'gz_version':
+        Gazebo Sim's major version
+        (default: '8')
+
+    'ign_args':
+        Deprecated: Arguments to be passed to Gazebo Sim
+        (default: '')
+
+    'ign_version':
+        Deprecated: Gazebo Sim's major version
+        (default: '')
+
+    'debugger':
+        Run in Debugger
+        (default: 'false')
+
+    'debug_env':
+        Debug environment variables
+        (default: 'false')
+
+    'on_exit_shutdown':
+        Shutdown on gz-sim exit
+        (default: 'false')
+Arguments (pass arguments as '<name>:=<value>'):
+
+    'geofence_center_lat':
+        Measured launch-site latitude
+
+    'geofence_center_lon':
+        Measured launch-site longitude
+
+    'geofence_radius_m':
+        Approved operating radius in metres
+
+    'max_thrust_pct':
+        Thrust cap in percent, 0-100
+        (default: '30.0')
+Arguments (pass arguments as '<name>:=<value>'):
+
+    'data_root':
+        no description given
+
+    'calibration_file':
+        no description given
+        (default: '')
+Arguments (pass arguments as '<name>:=<value>'):
+
+    'calibration':
+        no description given
+Arguments (pass arguments as '<name>:=<value>'):
+
+    'host':
+        no description given
+
+    'calibration':
+        no description given
+        (default: '')
+
+    'settings_file':
+        no description given
+        (default: '')
+
+    'timestamp_mode':
+        no description given
+        (default: 'receive')
+
+    'sensor_clock_verified':
+        no description given
+        (default: 'false')
+[WARN] [1794240900.739330847] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[WARN] [1794240900.739381701] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[WARN] [1794240902.389347782] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[WARN] [1794240902.389413495] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[WARN] [1794240902.534871462] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[WARN] [1794240902.534928830] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[INFO] [1794240902.626994687] [control_arbiter]: Control arbiter started -- sole publisher of boat/thrust_command. Priority: estop > hold > safety-stop > manual > recovery > waypoint > zero. Source timeout 0.50s, lease timeout 1.00s, failsafe level timeout 3.00s. Manual requires an explicit lease on boat/operator_command; legacy split commands are disabled. 
+[INFO] [1794240902.631280976] [control_arbiter]: Control source -> HOLD
+[INFO] [1794240902.633185193] [control_arbiter]: Manual lease -> HOLD
+[INFO] [1794240902.750707550] [safety_monitor]: Safety monitor started -- geofence OFF (150.0m radius, 135.0m warning ring, around 28.543611, -81.372778), GCS failsafe OFF (10.0s timeout, RTL after 30s). Failsafe ACTIONS ENABLED. Breach is level-triggered and responds with RETURN_TO_LAUNCH when heading is usable, POWERED_STOP when it is not.
+[WARN] [1794240903.727308570] [safety_monitor]: GEOFENCE IS DISABLED -- the boat has no boundary
+[INFO] [1794240904.773043163] [control_arbiter]: Control source -> ESTOP
+DDS smoke passed: fresh safety, zero idle thrust, ESTOP mode
+PASS: strict framing and bounded integers
+PASS: command, zero, reverse, stop ordering, watchdog, telemetry

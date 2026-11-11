@@ -19,6 +19,7 @@ the rate is derived from the quaternion yaw instead (logged once).
 import math
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, NavSatFix
 
@@ -245,11 +246,13 @@ class HeadingEstimatorNode(Node):
 
         # Log quality transitions, not every tick.
         if solution.quality != self._last_quality:
-            log = (self.get_logger().info if solution.quality >= 2
-                   else self.get_logger().warn)
-            log('Heading quality -> %s%s'
+            message = ('Heading quality -> %s%s'
                 % (solution.quality_name,
                    (' (%s)' % solution.detail) if solution.detail else ''))
+            if solution.quality >= 2:
+                self.get_logger().info(message)
+            else:
+                self.get_logger().warn(message)
             self._last_quality = solution.quality
 
 
@@ -258,11 +261,11 @@ def main(args=None):
     node = HeadingEstimatorNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

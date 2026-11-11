@@ -172,6 +172,7 @@ class HeadingEstimator:
         # Filter state
         self.heading_deg = None          # None until first referenced
         self.gyro_bias_dps = 0.0
+        self.needs_reference = False
         self.last_predict_at = None
         self.last_reference_at = None
         self.last_reference_source = ''
@@ -229,6 +230,8 @@ class HeadingEstimator:
         self.last_rate_dps = rate_dps
 
         if self.last_predict_at is None:
+            if self.last_reference_at is not None and now - self.last_reference_at > MAX_PREDICT_DT_SEC:
+                self.needs_reference = True
             self.last_predict_at = now
             return False
 
@@ -237,6 +240,8 @@ class HeadingEstimator:
         if dt < MIN_PREDICT_DT_SEC:
             return False
         if dt > MAX_PREDICT_DT_SEC:
+            self.needs_reference = (self.last_reference_at is None or
+                                    now - self.last_reference_at > MAX_PREDICT_DT_SEC)
             # Long gap (stalled node): skip it instead of assuming a constant
             # rate. age_since_reference still counts the time.
             return False
@@ -256,15 +261,15 @@ class HeadingEstimator:
         try:
             speed = float(speed_mps)
         except (TypeError, ValueError):
-            return
-        if math.isfinite(speed):
-            self.ground_speed_mps = speed
+            speed = float('nan')
+        self.ground_speed_mps = speed if math.isfinite(speed) and speed >= 0 else float('nan')
 
     def on_cog(self, cog_deg, speed_mps, now):
         """Correct step from GPS course over ground. Returns True if used.
 
         Adds the speed gate: below the threshold COG is not a measurement.
         """
+        self.last_cog_accepted = False
         self.on_ground_speed(speed_mps)
         try:
             cog_deg = float(cog_deg)
@@ -297,8 +302,8 @@ class HeadingEstimator:
             return False
         heading_deg = wrap_heading_deg(heading_deg)
 
-        if self.heading_deg is None:
-            # First reference: adopt it directly instead of converging slowly
+        if self.heading_deg is None or self.needs_reference:
+            # First reference (or recovery after a missing integration interval): adopt it directly instead of converging slowly
             # from an unknown start.
             self.heading_deg = heading_deg
         else:
@@ -308,6 +313,7 @@ class HeadingEstimator:
             self.heading_deg = wrap_heading_deg(
                 self.heading_deg + (1.0 - alpha) * error)
 
+        self.needs_reference = False
         self.last_reference_at = now
         self.last_reference_source = source
         if source != SOURCE_COG:
@@ -365,6 +371,18 @@ class HeadingEstimator:
         drifted_deg = age * self.assumed_drift_dps
         s.confidence = max(0.0, min(
             1.0, 1.0 - drifted_deg / CONFIDENCE_FLOOR_ERROR_DEG))
+
+        gyro_age = (float('inf') if self.last_predict_at is None
+                    else now - self.last_predict_at)
+        # Fresh references can stand alone briefly. Coasting requires continuing
+        # gyro samples; a resumed gyro cannot reconstruct a missed turn.
+        if self.needs_reference or (age > MAX_PREDICT_DT_SEC and
+                                   not 0 <= gyro_age <= MAX_PREDICT_DT_SEC):
+            s.quality = QUALITY_NONE
+            s.confidence = 0.0
+            s.cog_valid = False
+            s.detail = 'Gyro updates missing or interrupted; fresh heading reference required.'
+            return s
 
         if age > self.max_coast_sec:
             s.quality = QUALITY_NONE

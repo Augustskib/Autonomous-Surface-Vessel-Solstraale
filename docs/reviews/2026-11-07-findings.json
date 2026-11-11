@@ -1,0 +1,247 @@
+[
+  {
+    "id": "R01",
+    "priority": "P1",
+    "status": "Local repair; deployment validation pending",
+    "title": "Firmware accepts the tail of an oversized command",
+    "file": "firmware/boat_motor_controller/boat_motor_controller.ino",
+    "line": 64,
+    "impact": "A 32-character noise prefix followed by L:100 R:100 on the same line applies full thrust and refreshes the watchdog. Overflow resets the buffer immediately instead of discarding everything until newline. sscanf also accepts trailing garbage.",
+    "recommendation": "Use a discard-until-newline state, require complete bounded parsing, and add tests for fragmented, oversized and malformed commands. The host C++ probe reproduced both cases without hardware.",
+    "repair_update": "See docs/reviews/2026-11-08-repair-batch.md; hardware/ROS validation outstanding."
+  },
+  {
+    "id": "R02",
+    "priority": "P1",
+    "status": "Local repair; deployment validation pending",
+    "title": "Heading remains usable after the gyro stops",
+    "file": "src/boat_navigation/boat_navigation/heading.py",
+    "line": 341,
+    "impact": "After one reference and one gyro sample, evaluate(30) reports DEAD_RECKONING and source GYRO with no further gyro data. The ROS adapter keeps publishing at 20 Hz, so consumer message freshness cannot detect the frozen underlying measurement.",
+    "recommendation": "Track accepted gyro acquisition freshness independently of reference freshness. Expire the relevant estimate, expose degraded GPS-course-only operation separately, and test disconnected IMU with the estimator still running.",
+    "repair_update": "See docs/reviews/2026-11-08-repair-batch.md; hardware/ROS validation outstanding."
+  },
+  {
+    "id": "R03",
+    "priority": "P1",
+    "status": "Local repair; deployment validation pending",
+    "title": "GPS backlog is restamped as current data",
+    "file": "src/boat_hardware_interface/boat_hardware_interface/gps_publisher.py",
+    "line": 29,
+    "impact": "Only one NMEA line is consumed every 0.2 seconds, including ignored sentences. In a fake 10-line/s stream, after ten seconds 50 lines remain queued and the published sample is 4.9 seconds old, yet stamped with the current clock. Actual backlog depends on receiver configuration.",
+    "recommendation": "Use bounded nonblocking draining, retain the latest complete valid fix, preserve acquisition timing and report serial lag. Reject malformed numeric fields and configure receiver output deliberately.",
+    "repair_update": "See docs/reviews/2026-11-08-repair-batch.md; hardware/ROS validation outstanding."
+  },
+  {
+    "id": "R04",
+    "priority": "P1",
+    "status": "Local repair; deployment validation pending",
+    "title": "Manual-only bench launch cannot acquire control",
+    "file": "scripts/bench/bench_control.launch.py",
+    "line": 13,
+    "impact": "The launch starts the stricter arbiter but no safety_monitor. The arbiter now requires a fresh safety stream before MANUAL. This is a compatibility regression introduced by the recent hardening.",
+    "recommendation": "Provide an explicit supervised bench profile with appropriate site-independent policy and test its complete launch. Do not globally disable supervision to make the bench work.",
+    "repair_update": "See docs/reviews/2026-11-08-repair-batch.md; hardware/ROS validation outstanding."
+  },
+  {
+    "id": "R05",
+    "priority": "P1",
+    "status": "Partial repair; motor-link health/acknowledgement outstanding",
+    "title": "Motor-link recovery can restore thrust without explicit rearm",
+    "file": "src/boat_hardware_interface/boat_hardware_interface/motor_driver.py",
+    "line": 122,
+    "impact": "Serial reconnection is automatic; incoming commands continue to be accepted while disconnected. When the port returns, the next command is sent. STATUS watchdog/applied-output reports are ignored, so the arbiter/UI cannot distinguish requested control from motor-link health.",
+    "recommendation": "Publish motor-controller health and applied output, latch Hold on loss/reset, and require explicit rearm after a reconnect. Test actual USB disconnect, Arduino reboot and stale queued commands.",
+    "repair_update": "See docs/reviews/2026-11-08-repair-batch.md; hardware/ROS validation outstanding."
+  },
+  {
+    "id": "R06",
+    "priority": "P1",
+    "status": "Integration contract defect",
+    "title": "IMU covariance marks real measurements as absent",
+    "file": "src/boat_hardware_interface/boat_hardware_interface/motor_driver.py",
+    "line": 280,
+    "impact": "Gyro and acceleration are populated, but covariance[0] is -1 in both IMU publishers. ROS Imu defines -1 as no estimate; unknown covariance is all zeros. A compliant future EKF can discard these data. Current custom heading logic ignores the covariance, hiding the mismatch.",
+    "recommendation": "Publish measured covariance, or unknown zeros pending calibration; reserve -1 for unavailable components. Add an EKF-facing message contract test. See the linked official Imu definition."
+  },
+  {
+    "id": "R07",
+    "priority": "P1",
+    "status": "Integration gap",
+    "title": "Sensor frames are incomplete and camera axes disagree",
+    "file": "src/boat_description/urdf/boat.urdf",
+    "line": 73,
+    "impact": "No imu_frame or lidar_frame exists. camera_frame has body-aligned axes, while dock_marker_node reports optical coordinates under the image frame name. Neither runtime launch starts robot_state_publisher. The mesh also points to an old laptop absolute path.",
+    "recommendation": "Use a portable description with measured sensor mounts, camera optical frame, IMU and LiDAR frames; publish static transforms in hardware and simulation. Add dynamic map/odom transforms only from an actual localization source."
+  },
+  {
+    "id": "R08",
+    "priority": "P2",
+    "status": "Reproduced; existing documented TODO",
+    "title": "Battery display assumes four cells on the documented three-cell boat",
+    "file": "src/boat_web_ui/boat_web_ui/web_server.py",
+    "line": 66,
+    "impact": "The production function classifies 12.6 V as BELOW_RESERVE with zero reserve. Passing cells=3 classifies the same input as OK. This is a display/model error, not a verified battery protection system.",
+    "recommendation": "Make chemistry/cell count site or hardware configuration; label voltage-derived reserve as an estimate and test configured thresholds. Confirm the installed pack before changing deployment settings."
+  },
+  {
+    "id": "R09",
+    "priority": "P2",
+    "status": "Confirmed configuration limitation",
+    "title": "Current sensing depends on unverified hard-coded shunts",
+    "file": "src/boat_hardware_interface/boat_hardware_interface/power_monitor.py",
+    "line": 29,
+    "impact": "Addresses and shunt resistance are fixed in code and documented as unverified. Current is divided by that value, so a mismatch directly scales every current/power reading. There is no sensor-identity or saturation check.",
+    "recommendation": "Parameterize each channel, verify markings and address, compare readings with known measurements, and mark uncalibrated data explicitly. Do not use it for automatic protection until validated."
+  },
+  {
+    "id": "R10",
+    "priority": "P1",
+    "status": "Reproduced; previously listed gap",
+    "title": "Post-processing cannot locate normal recorder output",
+    "file": "scripts/postprocess_run.py",
+    "line": 61,
+    "impact": "Recorder writes run/bag/rosbag2/*.mcap; finder only glob-searches run/bag/*.mcap. A run path fails discovery. Direct nested-file invocation also selects the wrong run root for manifest merging, and only the first bag file is processed.",
+    "recommendation": "Resolve the archive root from manifest/metadata, discover all segments deterministically and test using an archive produced by the recorder."
+  },
+  {
+    "id": "R11",
+    "priority": "P1",
+    "status": "Reproduced; previously listed gap",
+    "title": "Real NavSatFix messages break synchronization processing",
+    "file": "scripts/postprocess_run.py",
+    "line": 157,
+    "impact": "build_sync_index reads gps_msg.status as though it were an integer; it is a nested NavSatStatus message. Comparing it with zero raises TypeError.",
+    "recommendation": "Read status.status and test real ROS-shaped decoded records, including missing and no-fix samples. Synthetic flattened test data must not define the production schema."
+  },
+  {
+    "id": "R12",
+    "priority": "P1",
+    "status": "Reproduced",
+    "title": "Missing streams can produce a passing quality report",
+    "file": "scripts/postprocess_run.py",
+    "line": 168,
+    "impact": "With camera frames but no GPS or IMU, poor_sync is false and the quality report passes. An empty report also defaults to pass. Drop and sync issues mostly append warnings without failing the result.",
+    "recommendation": "Define required streams per collection profile, distinguish missing/unknown/degraded/fail, require minimum valid coverage, and make the quality criteria explicit."
+  },
+  {
+    "id": "R13",
+    "priority": "P2",
+    "status": "Reproduced",
+    "title": "Sorting removes evidence of out-of-order samples",
+    "file": "scripts/postprocess_run.py",
+    "line": 81,
+    "impact": "The loader sorts by log time before validating ordering. The out-of-order check therefore sees sorted input and reports zero. Synchronization also uses arrival/log time rather than sensor acquisition time.",
+    "recommendation": "Validate original sequence and header timestamps before sorting a separate index; keep both acquisition and receipt clocks, with offset and clock-reset diagnostics."
+  },
+  {
+    "id": "R14",
+    "priority": "P2",
+    "status": "Confirmed",
+    "title": "Post-processing invalidates the capture checksum manifest",
+    "file": "scripts/postprocess_run.py",
+    "line": 250,
+    "impact": "Capture hashes manifest.json, then post-processing overwrites it without regenerating or separating checksums. All decoded messages, including image payloads, are retained in RAM, which scales poorly with long recordings and LiDAR.",
+    "recommendation": "Keep immutable capture provenance/checksums and versioned derived reports. Stream metadata/timestamps rather than retaining every decoded sensor payload."
+  },
+  {
+    "id": "R15",
+    "priority": "P2",
+    "status": "Confirmed arithmetic / lifecycle gap",
+    "title": "Recording storage estimates are too optimistic and no reserve stop exists",
+    "file": "src/boat_data/boat_data/data_recorder.py",
+    "line": 97,
+    "impact": "640x480 bgr8 at 10 Hz is 9.216 MB/s or 33.18 GB/hour before overhead, versus the 7 GB/hour planning text. The start threshold is checked only at start; runtime status reports free space but does not stop before exhaustion. LiDAR adds model-dependent traffic.",
+    "recommendation": "Use observed rate for estimates and a configurable runtime reserve with graceful finalization. Measure actual MCAP storage and include LiDAR profile limits; do not treat the raw calculation as a measured disk rate."
+  },
+  {
+    "id": "R16",
+    "priority": "P2",
+    "status": "Reproduced",
+    "title": "Video encoding is unbounded per client",
+    "file": "src/boat_web_ui/boat_web_ui/web_server.py",
+    "line": 2596,
+    "impact": "An unchanged cached frame was JPEG-encoded ten times for ten reads with no pacing. Each connected viewer runs another encoder loop; an old frame continues to look like a streaming feed after capture stops.",
+    "recommendation": "Encode once per new frame, share bytes across clients, bound output FPS/quality and display frame age. Apply the same rule to detection video and future LiDAR previews."
+  },
+  {
+    "id": "R17",
+    "priority": "P2",
+    "status": "Confirmed",
+    "title": "Most subsystem status can remain green after its publisher dies",
+    "file": "src/boat_web_ui/boat_web_ui/web_server.py",
+    "line": 2935,
+    "impact": "Operator and mission status have arrival times, but cached camera/power/system/recording/dock-marker state has no general expiry. Recording may keep displaying the last true value after the recorder node disappears; a last detected marker can persist after video loss.",
+    "recommendation": "Give every status source its own timestamp, timeout and unavailable state. Display sensor age separately from transport connectivity. Extend this contract to LiDAR."
+  },
+  {
+    "id": "R18",
+    "priority": "P2",
+    "status": "Confirmed",
+    "title": "Non-control buttons still report success without delivery",
+    "file": "src/boat_web_ui/boat_web_ui/web_server.py",
+    "line": 2516,
+    "impact": "Recording and detector endpoints return status ok even when ros_node is absent; they do not require matching subsystem acceptance. Several JSON handlers still assume an object. The corrected operator protocol has not been generalized to these commands.",
+    "recommendation": "Validate input types and use accepted/pending/failed receipts for subsystem actions. Include recorder absent, full disk, model-load failure and no ROS tests."
+  },
+  {
+    "id": "R19",
+    "priority": "P2",
+    "status": "Confirmed simulation mismatch",
+    "title": "Hold and powered safety stops ramp down in simulation",
+    "file": "src/boat_hardware_interface/boat_hardware_interface/thrust_splitter.py",
+    "line": 63,
+    "impact": "An ordinary zero target ramps from 30 N in roughly one second. Only the separate e-stop and watchdog paths bypass the ramp. The real driver writes zero immediately, so simulated Hold behavior differs from the control contract and real path.",
+    "recommendation": "Represent stop intent explicitly or bypass down-ramping for propulsion stops; preserve an intentional acceleration ramp. Test force output, not only arbiter percentages."
+  },
+  {
+    "id": "R20",
+    "priority": "P2",
+    "status": "Confirmed configuration gap",
+    "title": "Simulation time is not wired through the runtime",
+    "file": "src/boat_simulation/config/bridge.yaml",
+    "line": 5,
+    "impact": "The bridge has no /clock mapping and the launch does not set use_sim_time. Heading/GPS velocity math uses callback wall-time intervals although Gazebo sensors follow simulation timing. Slow or accelerated simulation changes estimated speed and course gating.",
+    "recommendation": "Use simulation time for sensor/physics calculations and retain monotonic/steady clocks for operator watchdogs. Test pause and changed real-time factor deliberately."
+  },
+  {
+    "id": "R21",
+    "priority": "P2",
+    "status": "Confirmed",
+    "title": "Simulation cleanup can kill unrelated processes and leave duplicates",
+    "file": "scripts/sim/boatsim.sh",
+    "line": 19,
+    "impact": "The script globally SIGKILLs generic names including web_server and safety_monitor, but omits control_arbiter and heading_estimator. It can affect another stack and still leave duplicate controller/heading publishers.",
+    "recommendation": "Manage a launch process group/PID set, shut down gracefully, and verify exactly one expected node per domain. Separate simulation and hardware ROS domains."
+  },
+  {
+    "id": "R22",
+    "priority": "P1",
+    "status": "Confirmed exposure; deployment-dependent reachability",
+    "title": "Network access is also control authority",
+    "file": "src/boat_web_ui/boat_web_ui/web_server.py",
+    "line": 3073,
+    "impact": "The server binds all interfaces with no authentication; Foxglove also exposes a separate ROS bridge. Operator session IDs provide ordering, not identity/security. The phone-hotspot/boat-modem network and reachable interfaces are not configured in this repository.",
+    "recommendation": "Define the trusted network boundary, authenticate command access, restrict bridge capabilities and use an encrypted private path when crossing networks. Test routing/reconnect separately from internet access; do not expose raw command ports publicly."
+  },
+  {
+    "id": "R23",
+    "priority": "P2",
+    "status": "Confirmed limitation",
+    "title": "Heading and calibration are not ready for global LiDAR fusion",
+    "file": "src/boat_navigation/boat_navigation/heading_estimator.py",
+    "line": 51,
+    "impact": "COG is travel direction, not bow yaw. A fixed 0.3 m displacement gate rejects clean 1 m/s motion at 5 Hz (0.2 m per fix); GPS noise can dominate consecutive-fix direction. The filter also accepts invalid speed by retaining an older valid speed.",
+    "recommendation": "Separate course, body attitude and map pose. Accumulate displacement over a suitable window, use receiver velocity/quality where available, reject invalid inputs, and calibrate before choosing an EKF. Start LiDAR visualization in the boat frame."
+  },
+  {
+    "id": "R24",
+    "priority": "P2",
+    "status": "Confirmed documentation / launch drift",
+    "title": "Launch and documentation no longer describe one consistent system",
+    "file": "docs/10_known_gaps.md",
+    "line": 21,
+    "impact": "The gaps page still says stale safety returns to nominal and command IDs do not exist; the current code differs. The simulation package launches boat_perception without declaring it as a runtime dependency. Recorder remains opt-in, and runtime launch does not include TF.",
+    "recommendation": "Update a single capability matrix with implemented/offline-tested/sim-tested/hardware-tested states. Add all launched package dependencies and launch smoke tests; keep hardware, bench and simulation profiles explicit."
+  }
+]

@@ -2,7 +2,7 @@
 
   in   boat/mission_command   (boat_msgs/MissionCommand) route requests
   in   boat/mission_feedback  (std_msgs/String)          from waypoint_follower
-  in   boat/mission_cancel    (std_msgs/Empty)           operator cancel
+  in   boat/mission_cancel    (std_msgs/String JSON)     identified operator cancel
   in   boat/estop             (std_msgs/Bool)
   out  boat/state             (std_msgs/String)          INIT/IDLE/EXECUTE/ABORTED
   out  boat/mission_active    (boat_msgs/MissionCommand) the accepted route
@@ -11,12 +11,15 @@ waypoint_follower listens to boat/mission_active, not boat/mission_command,
 so only routes this node accepted are flown.
 """
 
+import json
+import uuid
 import math
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import String, Bool, Empty
+from std_msgs.msg import String, Bool
 from boat_msgs.msg import MissionCommand
 
 from boat_control.mission_state import (
@@ -40,6 +43,7 @@ class MissionManager(Node):
         self.create_subscription(String, 'boat/mode', self.mode_callback, 10)
 
         self.state_pub = self.create_publisher(String, 'boat/state', 10)
+        self.status_pub = self.create_publisher(String, 'boat/mission_status', 10)
         # The accepted route. waypoint_follower subscribes to this.
         self.active_mission_pub = self.create_publisher(
             MissionCommand, 'boat/mission_active', 10)
@@ -49,7 +53,7 @@ class MissionManager(Node):
         self.feedback_sub = self.create_subscription(
             String, 'boat/mission_feedback', self.feedback_callback, 10)
         self.cancel_sub = self.create_subscription(
-            Empty, 'boat/mission_cancel', self.cancel_callback, 10)
+            String, 'boat/mission_cancel', self.cancel_callback, 10)
         # E-stop True aborts a running mission. False only clears the latch
         # so a new mission can be accepted; it resumes nothing.
         self.estop_sub = self.create_subscription(
@@ -71,13 +75,17 @@ class MissionManager(Node):
         self.last_mode_at = self._now()
         self.logic.set_paused(msg.data not in ('IDLE', 'WAYPOINT'), self.last_mode_at)
 
-    def _publish_state(self):
+    def _publish_state(self, request_id=None, accepted=None, reason=""):
         """Publish state on every transition, not only on the 1 Hz timer.
 
-        waypoint_follower gates on boat/state, so this avoids up to a
+        waypoint_follower gates on boat/mission_status, so this avoids up to a
         second where an accepted mission still looks idle to it.
         """
         self.state_pub.publish(String(data=self.logic.state))
+        self.status_pub.publish(String(data=json.dumps({
+            'manager_id': self.logic.manager_id, 'generation': self.logic.generation,
+            'execution_id': self.logic.execution_id, 'state': self.logic.state,
+            'request_id': request_id, 'accepted': accepted, 'reason': reason})))
 
     # Subscriptions
 
@@ -89,44 +97,32 @@ class MissionManager(Node):
         self.init_timer.cancel()
 
     def mission_callback(self, msg: MissionCommand):
-        # Message shape is checked here, mission logic in the state machine.
-        if len(msg.latitudes) != len(msg.longitudes):
-            self.get_logger().error(
-                'Rejecting mission command: mismatched latitude/longitude '
-                'array lengths (%d vs %d)'
-                % (len(msg.latitudes), len(msg.longitudes)))
+        if (not msg.execution_id or len(msg.execution_id) > 80 or
+                msg.manager_id != self.logic.manager_id or msg.generation != self.logic.generation):
+            self._publish_state(msg.execution_id, False, 'Mission request superseded; refresh status')
             return
-
-        if (not all(math.isfinite(x) and -90 <= x <= 90 for x in msg.latitudes)
-                or not all(math.isfinite(x) and -180 <= x <= 180 for x in msg.longitudes)):
-            self.get_logger().error('Rejecting mission: invalid waypoint coordinates')
+        if (not msg.latitudes or len(msg.latitudes) != len(msg.longitudes) or
+                len(msg.latitudes) > 1000 or
+                not all(math.isfinite(x) and -90 <= x <= 90 for x in msg.latitudes) or
+                not all(math.isfinite(x) and -180 <= x <= 180 for x in msg.longitudes)):
+            self._publish_state(msg.execution_id, False, 'Invalid waypoints')
             return
-        num_points = len(msg.latitudes)
-        accepted, reason = self.logic.request_mission(num_points, self._now())
-
-        if not accepted:
-            if reason == REASON_ESTOP:
-                self.get_logger().warn(
-                    'Rejecting mission command: e-stop is active -- clear it first')
-            elif reason == REASON_BAD_STATE:
-                self.get_logger().warn(
-                    'Rejecting mission command: state is %s, must be IDLE or '
-                    'ABORTED. Cancel the running mission (boat/mission_cancel, '
-                    'or the Cancel button) to get back to IDLE.' % self.logic.state)
-            elif reason == REASON_EMPTY:
-                self.get_logger().error(
-                    'Rejecting mission command: empty waypoint list')
-            return
-
-        self.get_logger().info(
-            'Mission accepted: %d waypoints -> EXECUTE' % num_points)
-        # State before route, so waypoint_follower sees EXECUTE before it
-        # loads the waypoints.
-        self._publish_state()
-        self.active_mission_pub.publish(msg)
+        accepted, reason = self.logic.request_mission(len(msg.latitudes), self._now(), uuid.uuid4().hex)
+        self._publish_state(msg.execution_id, accepted, reason)
+        if accepted:
+            # Accepted route carries the new generation, not the request's old one.
+            msg.generation = self.logic.generation
+            msg.execution_id = self.logic.execution_id
+            self.active_mission_pub.publish(msg)
 
     def feedback_callback(self, msg: String):
-        changed, note = self.logic.on_feedback(msg.data)
+        try:
+            feedback = json.loads(msg.data)
+            if not isinstance(feedback, dict):
+                return
+        except (ValueError, TypeError):
+            return
+        changed, note = self.logic.on_feedback(feedback.get('event'), feedback.get('execution_id'))
         if note == 'complete':
             self.get_logger().info(
                 'Navigation reports mission complete -> IDLE')
@@ -140,15 +136,20 @@ class MissionManager(Node):
         if changed:
             self._publish_state()
 
-    def cancel_callback(self, _msg: Empty):
-        was = self.logic.state
-        accepted, _reason = self.logic.cancel(self._now())
-        if not accepted:
-            self.get_logger().warn(
-                'Ignoring cancel: still in %s' % self.logic.state)
+    def cancel_callback(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            if not isinstance(data, dict):
+                return
+        except (ValueError, TypeError):
             return
-        self.get_logger().info('Mission cancelled by operator (%s -> IDLE)' % was)
-        self._publish_state()
+        if (data.get('manager_id') != self.logic.manager_id or
+                data.get('generation') != self.logic.generation or
+                not data.get('execution_id')):
+            self._publish_state(data.get('request_id'), False, 'Cancel superseded; refresh status')
+            return
+        accepted, reason = self.logic.cancel(self._now(), data['execution_id'])
+        self._publish_state(data.get('request_id'), accepted, reason)
 
     def estop_callback(self, msg: Bool):
         changed = self.logic.on_estop(msg.data)
@@ -176,11 +177,11 @@ def main(args=None):
     node = MissionManager()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

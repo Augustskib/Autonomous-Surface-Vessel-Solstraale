@@ -1,0 +1,5 @@
+# Quick source-only recheck after the full dependency image has built.
+FROM asv-validation:jazzy
+SHELL ["/bin/bash", "-c"]
+COPY . /ws
+RUN source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --cmake-args -DASV_BUILD_QUANERGY=OFF

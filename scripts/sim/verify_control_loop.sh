@@ -69,10 +69,10 @@ expect "control_arbiter, mission_manager, waypoint_follower, web_server all list
 printf '%sOBSERVED:%s running nodes ->\n' "$BOLD" "$RST"
 ros2 node list 2>/dev/null | sed 's/^/            /'
 echo
-expect "/boat/mode, /boat/cmd/control_mode, /boat/mission_active, /boat/mission_cancel present"
+expect "/boat/mode, /boat/operator_status, /boat/mission_active, /boat/mission_cancel present"
 note "these four are new in this change -- if any is missing, the build is stale"
 printf '%sOBSERVED:%s new topics ->\n' "$BOLD" "$RST"
-for t in /boat/mode /boat/cmd/control_mode /boat/mission_active /boat/mission_cancel; do
+for t in /boat/mode /boat/operator_status /boat/mission_active /boat/mission_cancel; do
   if ros2 topic list 2>/dev/null | grep -qx "$t"; then
     printf '            %s%-28s present%s\n' "$GRN" "$t" "$RST"
   else
@@ -85,7 +85,7 @@ pause
 step "1  Idle baseline, WITH the dashboard tab open"
 # ---------------------------------------------------------------------
 act "make sure http://localhost:5000 is open. Do not touch WASD."
-expect "/boat/mode is IDLE"
+expect "/boat/mode is HOLD, thrust 0/0"
 note "THIS IS THE PRE-FIX REGRESSION CHECK. On the OLD code this reads"
 note "MANUAL, because the browser published a neutral 0/0 thrust command"
 note "every 200ms and the arbiter counted that as 'the operator is"
@@ -98,10 +98,8 @@ pause
 # ---------------------------------------------------------------------
 step "2  Upload route 1 and confirm the boat actually drives"
 # ---------------------------------------------------------------------
-act "click 3 points on the dashboard map, then press Send Mission"
-note "or from the CLI, roughly 40m north of the Lake Eola spawn point:"
-note "  ros2 topic pub --once /boat/mission_command boat_msgs/msg/MissionCommand \\"
-note "    '{latitudes: [28.543971], longitudes: [-81.372778]}'"
+act "click 3 points on the dashboard map, then press Start Mission"
+note "Use the dashboard: raw CLI routes without manager/execution identity are rejected."
 pause
 expect "/boat/state EXECUTE   AND   /boat/mode WAYPOINT   AND non-zero thrust"
 note "EXECUTE with mode MANUAL or HOLD is the original bug: the mission is"
@@ -137,7 +135,7 @@ pause
 # ---------------------------------------------------------------------
 step "4  Release -- and confirm autonomy does NOT silently resume"
 # ---------------------------------------------------------------------
-act "click 'Release' (or just stop touching the keys for 5+ seconds)"
+act "click 'Hold'. Releasing keys alone stays MANUAL with neutral thrust."
 expect "/boat/mode is HOLD, thrust latched at 0/0, and it STAYS there"
 note "This is the safety property. The mission is still EXECUTE and the"
 note "follower is still publishing to /boat/cmd/waypoint -- the arbiter"
@@ -154,7 +152,7 @@ pause
 # ---------------------------------------------------------------------
 step "5  Explicit resume"
 # ---------------------------------------------------------------------
-act "click 'Resume Auto'"
+act "click 'Continue Mission'"
 expect "/boat/mode returns to WAYPOINT and the boat starts moving again"
 sample /boat/mode data "/boat/mode"
 sample_thrust
@@ -174,7 +172,7 @@ pause
 # ---------------------------------------------------------------------
 step "7  Upload route 2 -- the reported symptom"
 # ---------------------------------------------------------------------
-act "plot new points and press Send Mission again. Restart NOTHING."
+act "plot new points and press Start Mission again. Restart NOTHING."
 expect "accepted: /boat/state EXECUTE, /boat/mode WAYPOINT, boat drives"
 note "the reported failure was 'the boat isn't in the correct state and"
 note "won't accept a new waypoint' -- a 409 here means it is still not"
@@ -191,7 +189,7 @@ act "hold W to take manual control, then CLOSE THE BROWSER TAB while holding it"
 expect "/boat/mode goes to HOLD within ~1s and stays there. NOT WAYPOINT."
 note "this simulates the operator's link dying mid-manoeuvre. The boat"
 note "must stop and stay stopped, not hand itself back to autonomy."
-note "control_arbiter should log: 'Manual lease EXPIRED'"
+note "Inspect /boat/operator_status; control_arbiter may log: 'Manual lease EXPIRED'"
 pause
 sample /boat/mode data "/boat/mode"
 sample_thrust

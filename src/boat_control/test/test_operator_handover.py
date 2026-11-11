@@ -13,13 +13,16 @@ from boat_control.mission_state import MissionStateMachine
 
 
 def command(a, seq, intent, now, transition=True, session='pilot', thrust=0):
-    return a.on_operator_command(dict(session=session, seq=seq, intent=intent,
-                                     transition=transition, left=thrust, right=thrust), now)
+    data = dict(session=session, seq=seq, intent=intent, transition=transition,
+                left=thrust, right=thrust, authority=a.authority)
+    if transition and intent in ('MANUAL', 'AUTO', 'RESET'):
+        data['ticket'] = a.prepare_transition(data, now)
+    return a.on_operator_command(data, now)
 
 
 class HandoverTests(unittest.TestCase):
     def test_manual_route_takeover_hold_continue(self):
-        a, m = ControlArbitration(), MissionStateMachine(timeout_sec=10)
+        a, m = ControlArbitration(require_supervisor=False), MissionStateMachine(timeout_sec=10)
         m.finish_init()
         self.assertTrue(command(a, 1, 'MANUAL', 0, thrust=30)[0])
         self.assertEqual(a.evaluate(0), (30, 30, 'MANUAL'))
@@ -46,7 +49,7 @@ class HandoverTests(unittest.TestCase):
         self.assertIsNotNone(m.tick(111))
 
     def test_old_manual_packet_cannot_undo_hold_or_resume(self):
-        a = ControlArbitration()
+        a = ControlArbitration(require_supervisor=False)
         command(a, 1, 'MANUAL', 0, thrust=50)
         command(a, 3, 'HOLD', .2)
         self.assertFalse(command(a, 2, 'MANUAL', .3, False, thrust=90)[0])
@@ -58,7 +61,7 @@ class HandoverTests(unittest.TestCase):
 
     def test_link_loss_in_manual_and_auto_requires_explicit_reentry(self):
         for intent in ('MANUAL', 'AUTO'):
-            a = ControlArbitration()
+            a = ControlArbitration(require_supervisor=False)
             command(a, 1, 'HOLD', 0)
             command(a, 2, intent, .1, thrust=50)
             a.on_waypoint_thrust(60, 60, 2)
@@ -71,7 +74,7 @@ class HandoverTests(unittest.TestCase):
             self.assertEqual(a.evaluate(2), (10, 10, 'MANUAL'))
 
     def test_reset_cannot_restore_old_thrust(self):
-        a = ControlArbitration()
+        a = ControlArbitration(require_supervisor=False)
         command(a, 1, 'MANUAL', 0, thrust=80)
         command(a, 2, 'ESTOP', .1)
         self.assertEqual(a.evaluate(.1), (0, 0, 'ESTOP'))
@@ -81,26 +84,26 @@ class HandoverTests(unittest.TestCase):
         self.assertFalse(command(a, 4, 'MANUAL', .3, False, thrust=80)[0])
 
     def test_old_browser_and_legacy_topic_cannot_reclaim_control(self):
-        a = ControlArbitration()
+        a = ControlArbitration(require_supervisor=False)
         command(a, 1, 'MANUAL', 0, session='one', thrust=30)
         command(a, 1, 'MANUAL', .1, session='two', thrust=20)
-        self.assertFalse(command(a, 100, 'MANUAL', .2, session='one', thrust=90)[0])
+        self.assertFalse(a.on_operator_command(dict(session='one', seq=100, intent='MANUAL', transition=True, left=90, right=90), .2)[0])
         self.assertFalse(a.on_manual_thrust(90, 90, .2))
         self.assertFalse(a.on_control_mode('RESUME', .2))
         self.assertEqual(a.evaluate(.2), (20, 20, 'MANUAL'))
 
     def test_safety_stop_beats_manual_and_stale_supervisor_stays_stopped(self):
-        a = ControlArbitration()
+        a = ControlArbitration(require_supervisor=False)
         command(a, 1, 'MANUAL', 0, thrust=50)
         a.on_failsafe_level(3, 0)
         self.assertEqual(a.evaluate(0), (0, 0, 'FAILSAFE'))
         a.on_failsafe_level(0, .1)
         # Even a previously nominal safety feed must not fail open.
         command(a, 2, 'MANUAL', 4, thrust=50)
-        self.assertEqual(a.evaluate(4), (0, 0, 'FAILSAFE'))
+        self.assertEqual(a.evaluate(4), (0, 0, 'HOLD'))
 
     def test_invalid_commands_and_duplicate_sequence_do_not_move(self):
-        a = ControlArbitration()
+        a = ControlArbitration(require_supervisor=False)
         command(a, 1, 'HOLD', 0)
         self.assertFalse(command(a, 1, 'MANUAL', 0, thrust=100)[0])
         self.assertFalse(command(a, 2, 'MANUAL', 0, thrust=float('nan'))[0])
@@ -135,6 +138,10 @@ class NavigationPauseTests(unittest.TestCase):
     def make_follower(self):
         cls = follower_class()
         f = cls.__new__(cls)
+        f.execution_id = f.status_execution_id = 'test-run'
+        f.status_manager_id = f.mission_manager_id = 'test-manager'
+        f.status_generation = f.mission_generation = 1
+        f.status_at = time.monotonic()
         f.mission_active = True
         f.boat_state = 'EXECUTE'
         f._seen_execute = True
@@ -172,7 +179,8 @@ class NavigationPauseTests(unittest.TestCase):
         f.mode_callback(types.SimpleNamespace(data='IDLE'))
         f.control_loop()
         self.assertEqual(f.current_waypoint_idx, 1)
-        self.assertEqual(f.feedback[0].data, 'WAYPOINT_REACHED 0')
+        self.assertEqual(__import__('json').loads(f.feedback[0].data),
+                         {'execution_id':'test-run','event':'WAYPOINT_REACHED 0'})
 
     def test_abort_while_paused_still_clears_active_mission(self):
         f = self.make_follower()

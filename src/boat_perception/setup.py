@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'lidar_preview = boat_perception.lidar_preview:main',
             'camera_publisher = boat_perception.camera_publisher:main',
             'detector_node = boat_perception.detector_node:main',
             'dock_marker_node = boat_perception.dock_marker_node:main',

@@ -15,6 +15,8 @@ deliberate cancel is not a fault. request_mission() returns
 (accepted, reason) so the dashboard can tell the operator why.
 """
 
+import uuid
+
 INIT = 'INIT'
 IDLE = 'IDLE'
 EXECUTE = 'EXECUTE'
@@ -38,6 +40,9 @@ class MissionStateMachine:
     def __init__(self, timeout_sec=DEFAULT_MISSION_TIMEOUT_SEC):
         self.timeout_sec = timeout_sec
         self.state = INIT
+        self.manager_id = uuid.uuid4().hex
+        self.generation = 0
+        self.execution_id = None
         self.estop_active = False
         self.execute_started_at = None
         # Point count of the loaded mission.
@@ -54,7 +59,7 @@ class MissionStateMachine:
             return True
         return False
 
-    def request_mission(self, num_points, now):
+    def request_mission(self, num_points, now, execution_id=None):
         """Try to accept a mission. Returns (accepted, reason).
 
         E-stop is checked first since it is the most common reason a
@@ -66,30 +71,40 @@ class MissionStateMachine:
             return False, REASON_BAD_STATE
         if num_points <= 0:
             return False, REASON_EMPTY
+        self.execution_id = execution_id or uuid.uuid4().hex
+        self.generation += 1
         self.state = EXECUTE
         self.execute_started_at = now
         self.paused_since = now if self.paused else None
         self.active_point_count = num_points
         return True, REASON_OK
 
-    def cancel(self, now=None):
+    def cancel(self, now=None, execution_id=None):
         """Operator stop. Returns (accepted, reason). Lands in IDLE."""
+        if execution_id is not None and execution_id != self.execution_id:
+            return False, 'WRONG_EXECUTION'
         if self.state == INIT:
             return False, REASON_BAD_STATE
+        self.generation += 1
         self.state = IDLE
         self.execute_started_at = None
         self.active_point_count = 0
         return True, REASON_OK
 
-    def on_feedback(self, data):
+    def on_feedback(self, data, execution_id=None):
         """Handle boat/mission_feedback from waypoint_follower.
 
         Returns (state_changed, note). Ignored outside EXECUTE so a late
         message after an abort changes nothing.
         """
+        if execution_id is None or execution_id != self.execution_id:
+            return False, 'ignored (wrong execution)'
+        if not isinstance(data, str):
+            return False, 'unrecognized'
         if self.state != EXECUTE:
             return False, 'ignored (not executing)'
         if data == 'MISSION_COMPLETE':
+            self.generation += 1
             self.state = IDLE
             self.execute_started_at = None
             self.active_point_count = 0
@@ -97,6 +112,7 @@ class MissionStateMachine:
         if data.startswith('WAYPOINT_REACHED'):
             return False, 'progress'
         if data.startswith('MISSION_ABORTED'):
+            self.generation += 1
             self.state = ABORTED
             self.execute_started_at = None
             self.active_point_count = 0
@@ -108,6 +124,7 @@ class MissionStateMachine:
         was_active = self.estop_active
         self.estop_active = bool(active)
         if self.estop_active and not was_active and self.state == EXECUTE:
+            self.generation += 1
             self.state = ABORTED
             self.execute_started_at = None
             self.active_point_count = 0
@@ -123,6 +140,7 @@ class MissionStateMachine:
             return None
         elapsed = now - self.execute_started_at
         if elapsed > self.timeout_sec:
+            self.generation += 1
             self.state = ABORTED
             self.execute_started_at = None
             self.active_point_count = 0

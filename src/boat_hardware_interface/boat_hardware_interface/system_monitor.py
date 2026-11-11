@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -124,8 +125,10 @@ class SystemMonitor(Node):
                 'free_gb': round(usage.free / 1e9, 1),
                 'total_gb': round(usage.total / 1e9, 1),
                 'used_pct': round(100.0 * usage.used / usage.total, 1),
-                # Rough estimate at ~7 GB/hour for 640x480 10 fps imagery.
-                'est_imagery_minutes': round(usage.free / 7e9 * 60.0, 0),
+                # No recording-rate measurement here. Recorder owns duration estimates.
+                'est_imagery_minutes': None,
+                'requested_path': path,
+                'fallback': candidate != path,
             }
         return None
 
@@ -181,11 +184,11 @@ def main(args=None):
     node = SystemMonitor()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

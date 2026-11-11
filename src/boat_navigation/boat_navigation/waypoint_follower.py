@@ -19,8 +19,9 @@ import time
 import json
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import String, Empty
+from std_msgs.msg import String
 from sensor_msgs.msg import NavSatFix, Imu
 from foxglove_msgs.msg import GeoJSON
 from boat_msgs.msg import (
@@ -154,6 +155,13 @@ class WaypointFollower(Node):
 
         self.waypoints = []           # list of (lat, lon)
         self.current_waypoint_idx = 0
+        self.execution_id = None
+        self.mission_manager_id = None
+        self.mission_generation = -1
+        self.status_execution_id = None
+        self.status_manager_id = None
+        self.status_generation = -1
+        self.status_at = None
         self.mission_active = False
         # Whether EXECUTE has been seen for the current mission (see control_loop).
         self._seen_execute = False
@@ -177,15 +185,12 @@ class WaypointFollower(Node):
         self.imu_sub = self.create_subscription(
             Imu, 'boat/imu', self.imu_callback, 10)
         self.state_sub = self.create_subscription(
-            String, 'boat/state', self.state_callback, 10)
+            String, 'boat/mission_status', self.state_callback, 10)
         # The route mission_manager accepted. Not boat/mission_command, so a
         # rejected route never gets flown.
         self.mission_sub = self.create_subscription(
             MissionCommand, 'boat/mission_active', self.mission_callback, 10)
-        # Operator cancel: stop immediately instead of waiting for the next
-        # state message.
-        self.cancel_sub = self.create_subscription(
-            Empty, 'boat/mission_cancel', self.cancel_callback, 10)
+        # Identified mission_status is the only cancellation authority.
 
         # control_arbiter owns boat/thrust_command.
         self.thrust_pub = self.create_publisher(ThrustCommand, 'boat/cmd/waypoint', 10)
@@ -243,10 +248,12 @@ class WaypointFollower(Node):
         self._heading_msg = msg
         self._heading_msg_time = self.get_clock().now().nanoseconds / 1e9
         if msg.quality != self._last_heading_quality:
-            log = (self.get_logger().info if msg.quality >= HeadingEstimate.FUSED
-                   else self.get_logger().warn)
-            log('Heading quality is now %d%s'
+            message = ('Heading quality is now %d%s'
                 % (msg.quality, (' -- %s' % msg.detail) if msg.detail else ''))
+            if msg.quality >= HeadingEstimate.FUSED:
+                self.get_logger().info(message)
+            else:
+                self.get_logger().warn(message)
             self._last_heading_quality = msg.quality
 
     def imu_callback(self, msg: Imu):
@@ -279,7 +286,35 @@ class WaypointFollower(Node):
         return None, True
 
     def state_callback(self, msg: String):
-        self.boat_state = msg.data
+        try:
+            status = json.loads(msg.data)
+            if not isinstance(status, dict) or not isinstance(status.get('generation'), int):
+                return
+        except (ValueError, TypeError):
+            return
+        if (status.get('manager_id') == self.status_manager_id and
+                status['generation'] < self.status_generation):
+            return
+        self.status_manager_id = status.get('manager_id')
+        self.status_generation = status['generation']
+        self.status_execution_id = status.get('execution_id')
+        self.status_at = time.monotonic()
+        self.boat_state = status.get('state')
+        # A terminal status for this execution clears even a route cancelled
+        # before its first control tick. Unrelated terminal status cannot erase
+        # a newly accepted route that is still waiting for its own status.
+        if (self.status_manager_id == self.mission_manager_id and
+                self.status_execution_id == self.execution_id and
+                self.status_generation >= self.mission_generation and
+                self.boat_state in ('IDLE', 'ABORTED')):
+            self.waypoints = []
+            self.current_waypoint_idx = 0
+            self.mission_active = False
+            self._seen_execute = False
+            self._closest_dist = float('inf')
+        if (self.boat_state != STATE_EXECUTE or
+                self.status_execution_id != self.execution_id):
+            self._publish_thrust(0.0, 0.0)
 
     def mode_callback(self, msg: String):
         self.control_mode = msg.data
@@ -294,6 +329,14 @@ class WaypointFollower(Node):
             self.get_logger().error(
                 'MissionCommand has mismatched latitudes/longitudes array lengths, ignoring')
             return
+        if (not msg.execution_id or
+                (msg.manager_id == self.status_manager_id and msg.generation < self.status_generation)):
+            return
+        if msg.execution_id == self.execution_id:
+            return  # Duplicate acceptance must not reset waypoint progress.
+        self.execution_id = msg.execution_id
+        self.mission_manager_id = msg.manager_id
+        self.mission_generation = msg.generation
         self.waypoints = list(zip(msg.latitudes, msg.longitudes))
         self.current_waypoint_idx = 0
         self.mission_active = len(self.waypoints) > 0
@@ -303,20 +346,14 @@ class WaypointFollower(Node):
         self._closest_dist = float('inf')
         self.get_logger().info(f'New mission accepted: {len(self.waypoints)} waypoints')
 
-    def cancel_callback(self, _msg: Empty):
-        """Operator cancelled. Drop the route and stop driving immediately."""
-        if not self.mission_active and not self.waypoints:
-            return
-        self.get_logger().info('Mission cancelled by operator -- clearing route')
-        self.waypoints = []
-        self.current_waypoint_idx = 0
-        self.mission_active = False
-        self._seen_execute = False
-        self._closest_dist = float('inf')
-        self._publish_thrust(0.0, 0.0)
-
     def control_loop(self):
         if not self.mission_active:
+            return
+        if (self.status_at is None or time.monotonic() - self.status_at > 1.5 or
+                self.status_execution_id != self.execution_id or
+                self.status_manager_id != self.mission_manager_id or
+                self.status_generation != self.mission_generation):
+            self._publish_thrust(0.0, 0.0)
             return
         if self.boat_state != STATE_EXECUTE:
             # Two different cases:
@@ -352,7 +389,7 @@ class WaypointFollower(Node):
                 if not self._gps_lost_reported:
                     self.get_logger().error(
                         f'GPS fix lost for {elapsed:.1f}s -> stopping and aborting mission')
-                    self.feedback_pub.publish(String(data='MISSION_ABORTED GPS_LOST'))
+                    self._feedback('MISSION_ABORTED GPS_LOST')
                     self.mission_active = False
                     self._gps_lost_reported = True
                 return
@@ -362,6 +399,15 @@ class WaypointFollower(Node):
             return
 
         waypoint_radius_m = float(self.get_parameter('waypoint_radius_m').value)
+        base_speed_pct = float(self.get_parameter('base_speed_pct').value)
+        steer_gain = float(self.get_parameter('steer_gain').value)
+        if not (math.isfinite(waypoint_radius_m) and waypoint_radius_m > 0
+                and math.isfinite(base_speed_pct) and 0 <= base_speed_pct <= 100
+                and math.isfinite(steer_gain) and steer_gain >= 0):
+            self._publish_thrust(0.0, 0.0)
+            self.get_logger().error('Invalid navigation parameters -> holding zero thrust',
+                                    throttle_duration_sec=5.0)
+            return
 
         target_lat, target_lon = self.waypoints[self.current_waypoint_idx]
         cur_lat, cur_lon = self.current_fix
@@ -383,14 +429,12 @@ class WaypointFollower(Node):
                 % (self.current_waypoint_idx, target_lat, target_lon,
                    'inside capture radius' if inside else 'passed it (fly-by)',
                    self._closest_dist))
-            self.feedback_pub.publish(String(data=f'WAYPOINT_REACHED {self.current_waypoint_idx}'))
+            self._feedback(f'WAYPOINT_REACHED {self.current_waypoint_idx}')
             self.current_waypoint_idx += 1
             self._closest_dist = float('inf')
             if self.current_waypoint_idx >= len(self.waypoints):
                 self._finish_mission()
             return
-
-        base_speed_pct = float(self.get_parameter('base_speed_pct').value)
 
         heading_deg, heading_degraded = self.current_heading_deg()
         if heading_deg is None:
@@ -399,7 +443,6 @@ class WaypointFollower(Node):
             self._publish_thrust(0.0, 0.0)
             return
 
-        steer_gain = float(self.get_parameter('steer_gain').value)
         if heading_degraded:
             # Gyro-only heading is drifting, so halve the steering authority.
             steer_gain *= 0.5
@@ -511,9 +554,13 @@ class WaypointFollower(Node):
         msg.right = max(-100.0, min(100.0, right))
         self.thrust_pub.publish(msg)
 
+    def _feedback(self, event):
+        self.feedback_pub.publish(String(data=json.dumps({
+            'execution_id': self.execution_id, 'event': event})))
+
     def _finish_mission(self):
         self.get_logger().info('Mission complete -- all waypoints reached')
-        self.feedback_pub.publish(String(data='MISSION_COMPLETE'))
+        self._feedback('MISSION_COMPLETE')
         self.mission_active = False
         self._publish_thrust(0.0, 0.0)
 
@@ -523,11 +570,11 @@ def main(args=None):
     node = WaypointFollower()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

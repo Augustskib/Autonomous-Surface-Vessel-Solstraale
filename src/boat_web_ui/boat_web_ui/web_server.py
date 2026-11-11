@@ -1,4 +1,10 @@
+import os
+import numpy as np
+from boat_web_ui.video_stream import SharedVideo
+from boat_web_ui.access import authorized, same_origin
 import json
+import re
+import uuid
 import math
 import socket
 import subprocess
@@ -7,6 +13,7 @@ import time
 from pathlib import Path
 import cv2
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Image, NavSatFix, Imu
 from std_msgs.msg import String, Bool, Empty
@@ -59,10 +66,9 @@ def _nan_to_none(x):
 
 # Battery reserve. Pure function, no ROS or Flask, so it can be unit tested.
 
-# Pack defaults. These assume a 4S LiPo, but the boat runs a 3S pack, so a
-# healthy 3S pack reads as BELOW_RESERVE. TODO: set DEFAULT_CELLS = 3 or make
-# it a parameter. 4.20 V/cell is full, 3.30 V/cell is the damage floor.
-DEFAULT_CELLS = 4
+# Pack defaults match the reported 3S LiPo. Voltage is only a rough reserve
+# indicator; these thresholds do not guarantee return-trip capacity.
+DEFAULT_CELLS = 3
 DEFAULT_CELL_FULL_V = 4.20
 DEFAULT_CELL_RESERVE_V = 3.60   # the FLOOR: enough left to get home
 DEFAULT_CELL_EMPTY_V = 3.30     # below this, damage
@@ -123,6 +129,9 @@ ros_node = None
 
 # Live telemetry, written by the ROS callbacks and read by /telemetry.
 # lat/lon stay None until the first fix so the map draws no marker.
+latest_recording_time = None
+latest_lidar = {}
+latest_lidar_time = None
 telemetry_lock = threading.RLock()  # telemetry() also calls _power_snapshot()
 latest_gps = {'lat': None, 'lon': None}
 latest_state = None
@@ -140,6 +149,9 @@ latest_mode = None
 latest_operator = {}
 latest_operator_time = None
 operator_receipts = {}
+mission_receipts = {}
+latest_mission = {}
+latest_mission_time = None
 # How long a control route waits for the ROS graph to confirm the result.
 CONTROL_ACK_TIMEOUT_SEC = 1.5
 CONTROL_ACK_POLL_SEC = 0.02
@@ -248,9 +260,18 @@ NAV_HTML = """
 # Banner logic shared by both pages. Each page calls updateBanner(data)
 # from its telemetry poll.
 BANNER_JS = """
+const operatorEvents = [];
+function logOperatorEvent(message) {
+    const log = document.getElementById('operator_event_log');
+    if (!log) return;
+    operatorEvents.unshift(new Date().toLocaleTimeString() + '  ' + message);
+    operatorEvents.length = Math.min(operatorEvents.length, 80);
+    log.textContent = operatorEvents.join(String.fromCharCode(10));
+}
 function notifyOperator(message) {
     const el = document.getElementById('operator_notice');
     if (el) el.textContent = message;
+    logOperatorEvent(message);
 }
 // Failsafe levels, mirroring boat_msgs/msg/FailsafeState.msg.
 const FS_NOMINAL = 0, FS_HOLD = 1, FS_RTL = 2, FS_PSTOP = 3, FS_HARD = 4;
@@ -367,9 +388,11 @@ function clearFailsafe(force) {
 function updateNavNote(data) {
     const el = document.getElementById('nav_note');
     if (!el) return;
-    const rec = data.recording || {};
+    const rawRec = data.recording || {};
+    const rec = rawRec.status_fresh === true ? rawRec : {status_fresh: false};
     const cam = data.camera || {};
     const parts = [];
+    if (!rec.status_fresh) parts.push('REC STATUS STALE');
     if (rec.recording) {
         parts.push(rec.writing === false ? 'REC · NOT WRITING' : 'REC');
     }
@@ -394,6 +417,8 @@ HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Ramberg Robotics | ASV Controller</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -637,75 +662,30 @@ HTML_PAGE = """
             <path d="M8.6 23.2 L16 15.8 L23.4 23.2" fill="none" stroke="#e8933a"
                   stroke-width="1.3" opacity="0.45"/>
         </svg>
-        <div class="brand-txt"><b>RAMBERG</b><span>ROBOTICS</span></div>
+        <div class="brand-txt"><b>SOLSTRAALE / ASV-01</b><span>GROUND CONTROL</span></div>
     </div>
     <div class="sysname">Autonomous Surface Vessel Controller</div>
     <div class="badges">
         <span class="badge" id="link_badge">LINK</span>
         <span class="badge" id="state_badge">--</span>
         <span class="badge" id="rec_badge">DATA OFF</span>
+        <span class="badge" id="lidar_badge" title="Point cloud preview: /boat/lidar/points_preview in Foxglove">LIDAR OFFLINE</span>
     </div>
 </header>
 
-<main class="grid">
-
-    <section class="col">
-        <div class="hdr"><span>Forward Camera</span><span class="badge" id="det_toggle_badge" onclick="toggleDetections()" style="cursor:pointer;" title="Toggle YOLO detection box overlay (placeholder model)">DETECT: OFF</span><em>LIVE</em></div>
-        <img class="pane" id="camera_pane" src="/video_feed">
-        <div class="strip">
-            <div class="eng-row">
-                <div class="eng-tag">PORT</div>
-                <div class="bar-container"><div class="bar-center"></div><div class="bar" id="left_bar"></div></div>
-                <div class="eng-num" id="left_val">0</div>
-            </div>
-            <div class="eng-row">
-                <div class="eng-tag">STBD</div>
-                <div class="bar-container"><div class="bar-center"></div><div class="bar" id="right_bar"></div></div>
-                <div class="eng-num" id="right_val">0</div>
-            </div>
-            <div class="hint">W/S THROTTLE &nbsp;&middot;&nbsp; A/D RUDDER &nbsp;&middot;&nbsp; RELEASE TO NEUTRAL</div>
-        </div>
-    </section>
-
-    <section class="col">
-        <div class="hdr"><span>Chart</span><em>L-CLICK PLOT WAYPOINT &middot; R-CLICK MOVE DOCK</em></div>
-        <div class="pane" id="map"></div>
-        <div class="strip">
-            <div class="mission-banner" id="mission_banner">NO ACTIVE MISSION</div>
-        </div>
-    </section>
-
-    <aside class="side">
-        <div class="box">
+<main class="grid console">
+<aside class="instrument-stack">        <div class="box">
             <div class="box-hdr">Vessel</div>
             <!-- Heading from boat/heading, shown with its quality. -->
-            <div class="kv"><i>Heading</i><b class="val" id="heading_val">--</b></div>
+            <div class="heading-instrument"><svg viewBox="0 0 170 170" aria-hidden="true"><g id="compass_card"><line x1="85.00" y1="13.00" x2="85.00" y2="5.00" stroke="currentColor"/><line x1="98.20" y1="10.15" x2="98.89" y2="6.22" stroke="currentColor"/><line x1="110.99" y1="13.58" x2="112.36" y2="9.82" stroke="currentColor"/><line x1="121.00" y1="22.65" x2="125.00" y2="15.72" stroke="currentColor"/><line x1="133.85" y1="26.78" x2="136.42" y2="23.72" stroke="currentColor"/><line x1="143.22" y1="36.15" x2="146.28" y2="33.58" stroke="currentColor"/><line x1="147.35" y1="49.00" x2="154.28" y2="45.00" stroke="currentColor"/><line x1="156.42" y1="59.01" x2="160.18" y2="57.64" stroke="currentColor"/><line x1="159.85" y1="71.80" x2="163.78" y2="71.11" stroke="currentColor"/><line x1="157.00" y1="85.00" x2="165.00" y2="85.00" stroke="currentColor"/><line x1="159.85" y1="98.20" x2="163.78" y2="98.89" stroke="currentColor"/><line x1="156.42" y1="110.99" x2="160.18" y2="112.36" stroke="currentColor"/><line x1="147.35" y1="121.00" x2="154.28" y2="125.00" stroke="currentColor"/><line x1="143.22" y1="133.85" x2="146.28" y2="136.42" stroke="currentColor"/><line x1="133.85" y1="143.22" x2="136.42" y2="146.28" stroke="currentColor"/><line x1="121.00" y1="147.35" x2="125.00" y2="154.28" stroke="currentColor"/><line x1="110.99" y1="156.42" x2="112.36" y2="160.18" stroke="currentColor"/><line x1="98.20" y1="159.85" x2="98.89" y2="163.78" stroke="currentColor"/><line x1="85.00" y1="157.00" x2="85.00" y2="165.00" stroke="currentColor"/><line x1="71.80" y1="159.85" x2="71.11" y2="163.78" stroke="currentColor"/><line x1="59.01" y1="156.42" x2="57.64" y2="160.18" stroke="currentColor"/><line x1="49.00" y1="147.35" x2="45.00" y2="154.28" stroke="currentColor"/><line x1="36.15" y1="143.22" x2="33.58" y2="146.28" stroke="currentColor"/><line x1="26.78" y1="133.85" x2="23.72" y2="136.42" stroke="currentColor"/><line x1="22.65" y1="121.00" x2="15.72" y2="125.00" stroke="currentColor"/><line x1="13.58" y1="110.99" x2="9.82" y2="112.36" stroke="currentColor"/><line x1="10.15" y1="98.20" x2="6.22" y2="98.89" stroke="currentColor"/><line x1="13.00" y1="85.00" x2="5.00" y2="85.00" stroke="currentColor"/><line x1="10.15" y1="71.80" x2="6.22" y2="71.11" stroke="currentColor"/><line x1="13.58" y1="59.01" x2="9.82" y2="57.64" stroke="currentColor"/><line x1="22.65" y1="49.00" x2="15.72" y2="45.00" stroke="currentColor"/><line x1="26.78" y1="36.15" x2="23.72" y2="33.58" stroke="currentColor"/><line x1="36.15" y1="26.78" x2="33.58" y2="23.72" stroke="currentColor"/><line x1="49.00" y1="22.65" x2="45.00" y2="15.72" stroke="currentColor"/><line x1="59.01" y1="13.58" x2="57.64" y2="9.82" stroke="currentColor"/><line x1="71.80" y1="10.15" x2="71.11" y2="6.22" stroke="currentColor"/><text x="85.00" y="28.00" text-anchor="middle" fill="currentColor" font-size="13">N</text><text x="146.00" y="89.00" text-anchor="middle" fill="currentColor" font-size="13">E</text><text x="85.00" y="150.00" text-anchor="middle" fill="currentColor" font-size="13">S</text><text x="24.00" y="89.00" text-anchor="middle" fill="currentColor" font-size="13">W</text></g></svg><span class="index">▼</span><b class="val heading-readout" id="heading_val">--</b><span class="caption">HEADING</span></div>
             <div class="kv"><i>Hdg Quality</i><b class="val sm" id="hdgq_val">--</b></div>
             <div class="kv"><i>Hdg Source</i><b class="val sm" id="hdgsrc_val">--</b></div>
             <div class="kv"><i>Roll</i><b class="val" id="roll_val">--</b></div>
             <div class="kv"><i>Pitch</i><b class="val" id="pitch_val">--</b></div>
             <div class="kv"><i>Ground Speed</i><b class="val" id="speed_val">--</b></div>
+            <div class="kv"><i>Battery</i><b class="val" id="pwr_pack">--</b></div>
             <div class="kv"><i>GPS Age</i><b class="val" id="gpsage_val">--</b></div>
             <div class="kv-stack"><i>Position</i><b class="val sm" id="gps_val">NO FIX</b></div>
-        </div>
-
-        <div class="box">
-            <div class="box-hdr">Navigation</div>
-            <div class="kv"><i>Waypoint</i><b class="val sm" id="wp_val">--</b></div>
-            <div class="kv"><i>Distance</i><b class="val sm" id="dist_val">--</b></div>
-            <div class="kv"><i>Bearing</i><b class="val sm" id="brg_val">--</b></div>
-            <div class="kv"><i>Hdg Error</i><b class="val sm" id="hdgerr_val">--</b></div>
-            <div class="kv"><i>Remaining</i><b class="val sm" id="rem_val">--</b></div>
-            <div class="kv"><i>ETA</i><b class="val sm" id="eta_val">--</b></div>
-            <div class="kv"><i>Progress</i><b class="val sm" id="prog_val">--</b></div>
-            <div class="kv"><i>Plotted</i><b class="val sm" id="plotted_val">0</b></div>
-        </div>
-
-        <div class="box" id="dock_marker_box">
-            <div class="box-hdr">Dock Marker</div>
-            <div class="kv"><i>Detected</i><b class="val sm" id="dockm_detected">--</b></div>
-            <div class="kv"><i>Distance</i><b class="val sm" id="dockm_dist">--</b></div>
-            <div class="kv"><i>Lateral</i><b class="val sm" id="dockm_lat">--</b></div>
         </div>
 
         <div class="box" id="safety_box">
@@ -718,6 +698,99 @@ HTML_PAGE = """
             <!-- Counts up while outside the fence. -->
             <div class="kv"><i>Time Outside</i><b class="val sm" id="fence_outside">--</b></div>
             <div class="kv"><i>GCS Link</i><b class="val sm" id="gcs_link">--</b></div>
+        </div>
+
+</aside>
+    <section class="col chart-panel">
+        <div class="hdr"><span>Navigation Map</span><em>L-CLICK PLOT WAYPOINT &middot; R-CLICK MOVE DOCK</em></div>
+        <div class="pane" id="map"></div>
+        <div class="strip">
+            <div class="mission-banner" id="mission_banner">NO ACTIVE MISSION</div>
+        </div>
+    </section>    <section class="col camera-panel">
+        <div class="hdr"><span>Bow Camera</span><button class="badge" id="det_toggle_badge" onclick="toggleDetections()" title="Toggle YOLO detection box overlay (placeholder model)">DETECT: OFF</button><em>FEED</em></div>
+        <img class="pane" id="camera_pane" src="/video_feed" alt="Waiting for camera feed">
+        <div class="strip">
+            <div class="eng-row">
+                <div class="eng-tag">PORT</div>
+                <div class="bar-container"><div class="bar-center"></div><div class="bar" id="left_bar"></div></div>
+                <div class="eng-num" id="left_val">0</div>
+            </div>
+            <div class="eng-row">
+                <div class="eng-tag">STBD</div>
+                <div class="bar-container"><div class="bar-center"></div><div class="bar" id="right_bar"></div></div>
+                <div class="eng-num" id="right_val">0</div>
+            </div>
+            <div class="hint">W/S THROTTLE &nbsp;&middot;&nbsp; A/D RUDDER &nbsp;&middot;&nbsp; RELEASE TO NEUTRAL</div>
+            <div class="thrust-limit"><span>CONFIGURED MANUAL LIMIT</span><b>{{ manual_thrust_limit }}%</b></div>
+        </div>
+        <div class="box event-panel">
+            <div class="box-hdr">Operator Event Log <small>THIS BROWSER</small></div>
+            <pre id="operator_event_log" aria-label="Operator event history">No operator events in this session.</pre>
+        </div>
+    </section>
+<div class="command-deck">        <div class="box authority">
+            <div class="box-hdr">Control Source</div>
+            <div class="kv"><i>Arbiter Mode</i><b class="val sm" id="mode_state">--</b></div>
+            <div class="kv"><i>Your Control</i><b class="val sm" id="lease_state">not acquired</b></div>
+            <div class="btngrid">
+                <button onclick="acquireLease('button')">Take Manual</button>
+                <button onclick="releaseLease()">Hold</button>
+                <button class="btn-go" onclick="resumeAuto()">Continue Mission</button>
+            </div>
+        </div>
+
+        <div class="box">
+            <div class="box-hdr">Controls</div>
+            <div class="btngrid">
+                <button class="btn-go" onclick="sendMission()">Start Mission</button>
+                <button onclick="clearPending()">Clear Points</button>
+                <button onclick="cancelMission()">Cancel Mission</button>
+                <button onclick="returnToDock()">Return Dock</button>
+                <button onclick="setDockHere()">Set Dock Here</button>
+                <button onclick="cancelMission()">Cancel + Clear Route</button>
+                <button class="btn-estop" onclick="engineStop()">Engine Stop</button>
+                <button class="btn-clear" onclick="resetToIdle()">Reset to Hold</button>
+            </div>
+            <div class="operator-note">Motor bars show requested thrust, not measured motor output.</div>
+        </div>
+</div>
+</main>
+<details class="console-details"><summary>NAVIGATION / POWER / DOCK / GEOFENCE SETTINGS</summary><div class="detail-grid">        <div class="box">
+            <div class="box-hdr">Navigation</div>
+            <div class="kv"><i>Waypoint</i><b class="val sm" id="wp_val">--</b></div>
+            <div class="kv"><i>Distance</i><b class="val sm" id="dist_val">--</b></div>
+            <div class="kv"><i>Bearing</i><b class="val sm" id="brg_val">--</b></div>
+            <div class="kv"><i>Hdg Error</i><b class="val sm" id="hdgerr_val">--</b></div>
+            <div class="kv"><i>Remaining</i><b class="val sm" id="rem_val">--</b></div>
+            <div class="kv"><i>ETA</i><b class="val sm" id="eta_val">--</b></div>
+            <div class="kv"><i>Progress</i><b class="val sm" id="prog_val">--</b></div>
+            <div class="kv"><i>Plotted</i><b class="val sm" id="plotted_val">0</b></div>
+        </div>
+
+        <div class="box" id="power_box">
+            <div class="box-hdr">Power &amp; Host</div>
+            <div class="kv"><i>Reserve</i><b class="val sm" id="pwr_reserve">--</b></div>
+            <div class="meter" id="pwr_meter"><span style="width:0%"></span></div>
+            <div class="note" id="pwr_caption">
+                Reserve is the band ABOVE a floor kept for the trip home,
+                so it reaches 0 while charge remains. Voltage-derived and
+                therefore weak: a LiPo sags under load and its curve is
+                flat mid-range. Coulomb counting would be better and
+                is not built yet.
+            </div>
+            <div id="pwr_channels"></div>
+            <div class="kv"><i>CPU Temp</i><b class="val sm" id="sys_temp">--</b></div>
+            <div class="kv"><i>Load (1m)</i><b class="val sm" id="sys_load">--</b></div>
+            <div class="kv"><i>Free Storage</i><b class="val sm" id="sys_disk">--</b></div>
+            <div class="kv"><i>Throttling</i><b class="val sm" id="sys_throttle">--</b></div>
+        </div>
+
+        <div class="box" id="dock_marker_box">
+            <div class="box-hdr">Dock Marker</div>
+            <div class="kv"><i>Detected</i><b class="val sm" id="dockm_detected">--</b></div>
+            <div class="kv"><i>Distance</i><b class="val sm" id="dockm_dist">--</b></div>
+            <div class="kv"><i>Lateral</i><b class="val sm" id="dockm_lat">--</b></div>
         </div>
 
         <div class="box" id="fence_box">
@@ -748,53 +821,7 @@ HTML_PAGE = """
             </div>
         </div>
 
-        <div class="box" id="power_box">
-            <div class="box-hdr">Power &amp; Host</div>
-            <div class="kv"><i>Pack</i><b class="val" id="pwr_pack">--</b></div>
-            <div class="kv"><i>Reserve</i><b class="val sm" id="pwr_reserve">--</b></div>
-            <div class="meter" id="pwr_meter"><span style="width:0%"></span></div>
-            <div class="note" id="pwr_caption">
-                Reserve is the band ABOVE a floor kept for the trip home,
-                so it reaches 0 while charge remains. Voltage-derived and
-                therefore weak: a LiPo sags under load and its curve is
-                flat mid-range. Coulomb counting would be better and
-                is not built yet.
-            </div>
-            <div id="pwr_channels"></div>
-            <div class="kv"><i>CPU Temp</i><b class="val sm" id="sys_temp">--</b></div>
-            <div class="kv"><i>Load (1m)</i><b class="val sm" id="sys_load">--</b></div>
-            <div class="kv"><i>Free Storage</i><b class="val sm" id="sys_disk">--</b></div>
-            <div class="kv"><i>Throttling</i><b class="val sm" id="sys_throttle">--</b></div>
-        </div>
-
-        <div class="box">
-            <div class="box-hdr">Control Source</div>
-            <div class="kv"><i>Arbiter Mode</i><b class="val sm" id="mode_state">--</b></div>
-            <div class="kv"><i>Your Control</i><b class="val sm" id="lease_state">not acquired</b></div>
-            <div class="btngrid">
-                <button onclick="acquireLease('button')">Take Manual</button>
-                <button onclick="releaseLease()">Hold</button>
-                <button class="btn-go" onclick="resumeAuto()">Continue Mission</button>
-            </div>
-        </div>
-
-        <div class="box">
-            <div class="box-hdr">Controls</div>
-            <div class="btngrid">
-                <button class="btn-go" onclick="sendMission()">Start Mission</button>
-                <button onclick="clearPending()">Clear Points</button>
-                <button onclick="cancelMission()">Cancel Mission</button>
-                <button onclick="returnToDock()">Return Dock</button>
-                <button onclick="setDockHere()">Set Dock Here</button>
-                <button onclick="clearActive()">Hide Route Drawing</button>
-                <button class="btn-estop" onclick="engineStop()">Engine Stop</button>
-                <button class="btn-clear" onclick="resetToIdle()">Reset to Hold</button>
-            </div>
-            <div style="padding:12px">Motor bars show requested thrust, not measured motor output.</div>
-        </div>
-    </aside>
-
-</main>
+</div></details>
 
 <script>
 let left = 0, right = 0;
@@ -1041,6 +1068,7 @@ function styleActiveRoute(currentIdx) {
     });
 }
 
+let activeExecutionId = null;
 // Route commands never silently replace an executing mission.
 async function startRoute(points) {
     if (routeBusy) { notifyOperator('A route request is already pending. Manual and Hold are still available.'); return false; }
@@ -1051,7 +1079,8 @@ async function startRoute(points) {
         if (!await releaseLease()) return false;
         const revision = operator.revision;
         routeRequest = postCommand('/mission', {latitudes:points.map(p=>p[0]), longitudes:points.map(p=>p[1])});
-        await routeRequest;
+        const acceptedRoute = await routeRequest;
+        activeExecutionId = acceptedRoute.execution_id;
         // A takeover or stop during mission acceptance must win.
         if (operator.revision !== revision) return false;
         missionActive = true;
@@ -1072,9 +1101,10 @@ function engineStop() {
     notifyOperator('Requesting emergency stop.');
     return operator.transition('ESTOP');
 }
-function resetToIdle() {
+async function resetToIdle() {
     clearDriveKeys();
     notifyOperator('Clearing E-stop into Hold. This does not resume a mission.');
+    if (!await releaseLease()) return false;
     return operator.transition('RESET');
 }
 async function cancelMission() {
@@ -1083,9 +1113,10 @@ async function cancelMission() {
     try {
         if (routeRequest) await routeRequest.catch(() => {});
         if (operator.revision !== revision) return;
-        await postCommand('/mission/cancel', {});
+        if (!activeExecutionId) throw new Error('No confirmed mission identity; refresh telemetry before cancelling.');
+        await postCommand('/mission/cancel', {execution_id:activeExecutionId});
         if (operator.revision !== revision) return;
-        missionActive = false; clearActive();
+        missionActive = false; clearActive(); clearPending(); activeExecutionId = null;
         notifyOperator('Mission cancelled. Holding zero thrust.');
     } catch(error) { notifyOperator(error.message); }
 }
@@ -1165,12 +1196,18 @@ function attitudeClass(v) {
 
 function updateTelemetry() {
     fetch('/telemetry').then((r) => r.json()).then((data) => {
+        const lidarBadge = document.getElementById('lidar_badge');
+        if (lidarBadge) {
+            const lidar = data.lidar || {};
+            lidarBadge.textContent = lidar.fresh ? (lidar.clock_verified ? 'LIDAR LIVE' : 'LIDAR / TIME UNVERIFIED') : 'LIDAR OFFLINE';
+        }
         const lb = document.getElementById('link_badge');
         const controlFresh = data.operator_age_s != null && data.operator_age_s <= 1;
         lb.innerText = controlFresh ? 'CONTROL LINK OK' : 'CONTROL LINK STALE';
         lb.className = controlFresh ? 'badge ok' : 'badge bad';
         operator.observe(data.operator, data.operator_age_s);
 
+        if (data.mission?.execution_id) activeExecutionId = data.mission.execution_id;
         const state = data.state || '--';
         const sb = document.getElementById('state_badge');
         sb.innerText = state;
@@ -1192,14 +1229,15 @@ function updateTelemetry() {
         }
 
         // Recording reminder. Full controls are on the Data page.
-        const rec = data.recording || {};
+        const rawRec = data.recording || {};
+    const rec = rawRec.status_fresh === true ? rawRec : {status_fresh: false};
         const recBadge = document.getElementById('rec_badge');
         if (rec.recording) {
             recBadge.innerText = 'REC ' + (rec.elapsed_s !== null && rec.elapsed_s !== undefined
                 ? rec.elapsed_s.toFixed(0) + 's' : '');
             recBadge.className = 'badge bad';
         } else {
-            recBadge.innerText = 'DATA OFF';
+            recBadge.innerText = rec.status_fresh ? 'DATA OFF' : 'DATA UNKNOWN';
             recBadge.className = 'badge';
         }
 
@@ -1363,6 +1401,16 @@ function updateHeading(hdg, rawImuHeading) {
     const qEl = document.getElementById('hdgq_val');
     const sEl = document.getElementById('hdgsrc_val');
     if (!valEl) return;
+    // North-up card rotates beneath the fixed bow index. Unknown is not zero.
+    const displayHeading = (hdg.quality === undefined || hdg.quality === null)
+        ? rawImuHeading : (hdg.quality >= 1 ? hdg.heading_deg : null);
+    const card = document.getElementById('compass_card');
+    if (card) {
+        const valid = typeof displayHeading === 'number' && Number.isFinite(displayHeading);
+        card.style.transformOrigin = '85px 85px';
+        card.style.transform = valid ? 'rotate(' + (-displayHeading) + 'deg)' : '';
+        card.style.opacity = valid ? '1' : '0.2';
+    }
 
     if (hdg.quality === undefined || hdg.quality === null) {
         // No estimator. Show the raw IMU value labelled as drifting.
@@ -1458,7 +1506,8 @@ function updatePower(data) {
         (load && load.length) ? load[0].toFixed(2) : '--';
 
     const dEl = document.getElementById('sys_disk');
-    const rec = data.recording || {};
+    const rawRec = data.recording || {};
+    const rec = rawRec.status_fresh === true ? rawRec : {status_fresh: false};
     let freeGb = (rec.free_gb !== null && rec.free_gb !== undefined)
         ? rec.free_gb : (sys.disk ? sys.disk.free_gb : null);
     if (freeGb === null || freeGb === undefined) {
@@ -1712,7 +1761,7 @@ DATA_PAGE = """
             <path d="M8.6 23.2 L16 15.8 L23.4 23.2" fill="none" stroke="#e8933a"
                   stroke-width="1.3" opacity="0.45"/>
         </svg>
-        <div class="brand-txt"><b>RAMBERG</b><span>ROBOTICS</span></div>
+        <div class="brand-txt"><b>SOLSTRAALE / ASV-01</b><span>GROUND CONTROL</span></div>
     </div>
     <div class="sysname">Data Collection</div>
     <div class="badges">
@@ -1784,8 +1833,21 @@ DATA_PAGE = """
                 </div>
             </div>
             <div class="btngrid">
-                <button class="btn-go" onclick="startDataRun()">Start Data Run</button>
-                <button class="btn-clear" onclick="stopDataRun()">Stop Recording</button>
+                <button id="record_start" class="btn-go" onclick="startDataRun()" disabled>Start Recording</button>
+                <button id="record_stop" class="btn-clear" onclick="stopDataRun()" disabled>Stop Recording</button>
+            </div>
+        </div>
+
+        <div class="box">
+            <div class="box-hdr">Saved Recordings</div>
+            <div style="padding:8px">
+                <p class="note">Data saves onboard while recording. Stop, then select a recording and save its name. Latest 100 shown; older folders remain on disk.</p>
+                <select id="saved_recordings" style="width:100%" aria-label="Saved recording"></select>
+                <input id="recording_name" maxlength="80" placeholder="Name, e.g. Lake test — morning" aria-label="Recording name">
+                <button id="record_save" onclick="saveRecordingName()" disabled>Save Name</button>
+                <p id="recording_details" style="overflow-wrap:anywhere"></p>
+                <p id="recording_feedback" role="status"></p>
+                <p class="note">At home: copy the run folder, then import its MCAP files into Foxglove. Naming does not upload or delete anything.</p>
             </div>
         </div>
 
@@ -1819,6 +1881,45 @@ DATA_PAGE = """
 
 <script>
 let currentOpenSegments = [];  // from /telemetry recording.open_segments
+let recordingRows = [];
+let recordingResult = '';
+async function recordingRequest(url, body) {
+    const output = document.getElementById('recording_feedback');
+    try {
+        const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+        const result = await response.json();
+        output.textContent = response.ok ? 'Request sent — waiting for recorder confirmation. Finalizing a large run may take time.' : (result.error || 'Request failed');
+    } catch (_) { output.textContent = 'Connection lost; check recorder status before retrying.'; }
+}
+function saveRecordingName() {
+    recordingRequest('/data/save_name', {run_id:document.getElementById('saved_recordings').value,
+        name:document.getElementById('recording_name').value});
+}
+function renderRecordingLibrary(rec) {
+    const select = document.getElementById('saved_recordings');
+    const selected = select.value;
+    recordingRows = rec.library || [];
+    select.replaceChildren();
+    for (const row of recordingRows) {
+        const option = document.createElement('option');
+        option.value = row.run_id;
+        option.textContent = (row.name || 'Unnamed') + ' | ' + (row.started_utc || row.run_id) + ' | ' + row.state;
+        select.appendChild(option);
+    }
+    if (recordingRows.some(row => row.run_id === selected)) select.value = selected;
+    const row = recordingRows.find(row => row.run_id === select.value);
+    document.getElementById('record_start').disabled = !rec.status_fresh || rec.recording;
+    document.getElementById('record_stop').disabled = !rec.status_fresh || !rec.recording;
+    document.getElementById('record_save').disabled = !rec.status_fresh || !row || !row.can_name;
+    document.getElementById('recording_details').textContent = row ?
+        (row.bytes == null ? '' : (row.bytes / 1e6).toFixed(1) + ' MB | ') + (row.folder || row.run_id) : 'No recordings listed yet.';
+    const result = JSON.stringify(rec.command_result || {});
+    if (rec.status_fresh && result !== recordingResult && rec.command_result) {
+        document.getElementById('recording_feedback').textContent = rec.command_result.detail;
+        recordingResult = result;
+    }
+}
+
 
 function toggleDetections() {
     // Also turns detector inference on or off, not just the display.
@@ -1844,12 +1945,12 @@ function startDataRun() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({site: site, purpose: purpose, source: source}),
     }).then((r) => r.json()).then((data) => {
-        if (data.status !== 'ok') notifyOperator('Start failed: ' + (data.error || 'unknown error'));
-    });
+        document.getElementById('recording_feedback').textContent = data.status === 'queued' ? 'Start requested — wait for RECORDING and disk writing confirmation.' : (data.error || 'Start failed');
+    }).catch(() => { document.getElementById('recording_feedback').textContent = 'Connection lost; recording state is unknown. Check status before retrying.'; });
 }
 
 function stopDataRun() {
-    fetch('/data/stop', {method: 'POST'});
+    recordingRequest('/data/stop', {});
 }
 
 function beginSegment() {
@@ -1859,7 +1960,7 @@ function beginSegment() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({label: label}),
     }).then((r) => r.json()).then((data) => {
-        if (data.status !== 'ok') notifyOperator('Begin segment failed: ' + (data.error || 'unknown error'));
+        if (data.status !== 'queued') notifyOperator('Begin segment failed: ' + (data.error || 'unknown error'));
         else document.getElementById('segment_label').value = '';
     });
 }
@@ -1875,7 +1976,7 @@ function endSegment() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({step_id: currentOpenSegments[0]}),
     }).then((r) => r.json()).then((data) => {
-        if (data.status !== 'ok') notifyOperator('End segment failed: ' + (data.error || 'unknown error'));
+        if (data.status !== 'queued') notifyOperator('End segment failed: ' + (data.error || 'unknown error'));
     });
 }
 
@@ -1895,10 +1996,11 @@ function updateTelemetry() {
         lb.innerText = 'LINK OK';
         lb.className = 'badge ok';
 
-        const rec = data.recording || {};
+        const rawRec = data.recording || {};
+    const rec = rawRec.status_fresh === true ? rawRec : {status_fresh: false};
         currentOpenSegments = rec.open_segments || [];
         const recEl = document.getElementById('rec_state');
-        recEl.innerText = rec.recording ? 'RECORDING' : 'OFF';
+        recEl.innerText = !rec.status_fresh ? 'UNKNOWN / STALE' : rec.recording ? 'RECORDING' : 'OFF';
         recEl.className = 'val sm ' + (rec.recording ? 'grn' : '');
 
         // recording only says a process exists.
@@ -1922,6 +2024,7 @@ function updateTelemetry() {
         document.getElementById('rec_rate').innerText =
             (rec.write_mb_per_s !== null && rec.write_mb_per_s !== undefined)
                 ? rec.write_mb_per_s.toFixed(2) + ' MB/s' : '--';
+        renderRecordingLibrary(rec);
         document.getElementById('rec_run_id').innerText = rec.run_id || '--';
         document.getElementById('rec_elapsed').innerText =
             (rec.elapsed_s !== null && rec.elapsed_s !== undefined)
@@ -1960,7 +2063,7 @@ function updateTelemetry() {
                    ? rec.elapsed_s.toFixed(0) + 's' : '');
             recBadge.className = 'badge bad';
         } else {
-            recBadge.innerText = 'DATA OFF';
+            recBadge.innerText = rec.status_fresh ? 'DATA OFF' : 'DATA UNKNOWN';
             recBadge.className = 'badge';
         }
 
@@ -1970,6 +2073,8 @@ function updateTelemetry() {
         updateNavNote(data);
     }).catch(() => {
         const lb = document.getElementById('link_badge');
+        renderRecordingLibrary({status_fresh:false});
+        document.getElementById('rec_state').innerText = 'UNKNOWN / NO LINK';
         lb.innerText = 'NO LINK';
         lb.className = 'badge bad';
     });
@@ -1977,7 +2082,8 @@ function updateTelemetry() {
 
 function updateCapture(data) {
     const cam = data.camera || {};
-    const rec = data.recording || {};
+    const rawRec = data.recording || {};
+    const rec = rawRec.status_fresh === true ? rawRec : {status_fresh: false};
     const alertEl = document.getElementById('capture_alert');
     const srcEl = document.getElementById('cam_source');
     const healthEl = document.getElementById('cam_health');
@@ -1988,6 +2094,7 @@ function updateCapture(data) {
 
     // A test pattern and real footage look the same everywhere else.
     let alerts = [];
+    if (!rec.status_fresh) alerts.push('RECORDER STATUS STALE &mdash; recording and disk writing are unconfirmed.');
     if (cam.mock_mode) {
         alerts.push('CAMERA IS IN MOCK MODE &mdash; the video above is a '
                   + 'synthetic test pattern, not the world. Anything recorded '
@@ -2101,6 +2208,9 @@ updateTelemetry();
 def _compose(page, active):
     """Splice the nav bar, banner and shared JS into a page template."""
     out = page.replace('/*__NAV_CSS__*/', NAV_CSS)
+    out = out.replace('</style>', Path(__file__).with_name('console.css').read_text(encoding='utf-8') + '\n</style>', 1)
+    if '<meta charset=' not in out:
+        out = out.replace('<head>', '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">', 1)
     out = out.replace('<!--__NAV__-->', NAV_HTML)
     out = out.replace('//__BANNER_JS__', BANNER_JS)
     out = out.replace('//__OPERATOR_JS__', Path(__file__).with_name('operator_controls.js').read_text(encoding='utf-8'))
@@ -2111,6 +2221,18 @@ def _compose(page, active):
 
 CONTROL_PAGE_HTML = _compose(HTML_PAGE, 'control')
 DATA_PAGE_HTML = _compose(DATA_PAGE, 'data')
+
+
+# Remote use goes through authenticated SSH forwarding to localhost.
+@app.before_request
+def check_access():
+    if request.host not in ('127.0.0.1:5000', 'localhost:5000', '[::1]:5000'):
+        return jsonify({'status': 'error', 'error': 'Use the local forwarded dashboard address'}), 400
+    if not authorized(request.authorization, os.environ.get('ASV_OPERATOR_PASSWORD', '')):
+        return Response('Authentication required', 401,
+                        {'WWW-Authenticate': 'Basic realm="ASV operator"'})
+    if request.method == 'POST' and not same_origin(request.headers.get('Origin'), request.host_url):
+        return jsonify({'status': 'error', 'error': 'Cross-origin command refused'}), 403
 
 
 @app.before_request
@@ -2209,92 +2331,19 @@ def _power_snapshot():
 
 
 @app.route('/thrust', methods=['POST'])
-def thrust():
-    """Manual thrust from the dashboard.
-
-    Only sent while the browser holds the manual lease, so 0/0 here is a
-    real stop command, not missing input.
-    """
-    data = request.get_json(silent=True) or {}
-    try:
-        left = float(data.get('left', 0))
-        right = float(data.get('right', 0))
-    except (TypeError, ValueError):
-        return jsonify({'status': 'error', 'error': 'left/right must be numbers'}), 400
-
-    # Reject NaN/inf before clamping. json.loads accepts them and min/max
-    # does not clamp NaN.
-    if not (math.isfinite(left) and math.isfinite(right)):
-        return jsonify({'status': 'error',
-                        'error': 'left/right must be finite numbers'}), 400
-
-    if not ros_node:
-        return jsonify({'status': 'error', 'error': 'ROS node not ready'}), 503
-
-    if latest_operator.get('session'):
-        return jsonify({'status': 'error', 'error': 'Reload dashboard: sequenced controls are active'}), 409
-
-    limit = ros_node.manual_thrust_limit
-    left = max(-limit, min(limit, left))
-    right = max(-limit, min(limit, right))
-    ros_node.publish_thrust(left, right)
-    # Echo what was published after clamping.
-    return jsonify({'status': 'ok',
-                    'left': max(-100.0, min(100.0, left)),
-                    'right': max(-100.0, min(100.0, right))})
-
-
 @app.route('/control_mode', methods=['POST'])
-def control_mode():
-    """Acquire, hold, release or hand back the manual lease.
-
-    MANUAL   a human is driving. Sent every 200 ms as the heartbeat.
-    RELEASE  the operator lets go. Thrust latches to zero, autonomy does not
-             resume.
-    RESUME   the operator allows autonomy to drive again.
-    """
-    data = request.get_json(silent=True) or {}
-    mode = str(data.get('mode', '')).strip().upper()
-    if mode not in ('MANUAL', 'RELEASE', 'RESUME'):
-        return jsonify({'status': 'error',
-                        'error': 'mode must be MANUAL, RELEASE or RESUME'}), 400
-    if not ros_node:
-        return jsonify({'status': 'error', 'error': 'ROS node not ready'}), 503
-
-    if latest_operator.get('session'):
-        return jsonify({'status': 'error', 'error': 'Reload dashboard: sequenced controls are active'}), 409
-
-    ros_node.publish_control_mode(mode)
-
-    # Do not wait on the 5 Hz MANUAL heartbeat, only on the one-shot
-    # transitions.
-    if mode == 'MANUAL':
-        return jsonify({'status': 'ok', 'mode': mode})
-
-    if mode == 'RELEASE':
-        expected = 'HOLD'
-        ok = _await(lambda: _snapshot()[2] == 'HOLD')
-    else:
-        # Lands in WAYPOINT if a mission is running, otherwise IDLE.
-        expected = 'IDLE or WAYPOINT'
-        ok = _await(lambda: _snapshot()[2] in ('IDLE', 'WAYPOINT'))
-
-    _, _, observed = _snapshot()
-    if not ok:
-        return jsonify({
-            'status': 'error',
-            'error': f'arbiter did not reach {expected} within '
-                     f'{CONTROL_ACK_TIMEOUT_SEC:.1f}s (boat/mode is {observed}). '
-                     f'Is control_arbiter running?',
-            'mode': observed,
-        }), 504
-    return jsonify({'status': 'ok', 'mode': observed})
+def legacy_control():
+    """Never acknowledge commands the production arbiter cannot accept."""
+    return jsonify(status='error', error='Legacy control disabled; reload the dashboard and use /operator'), 410
 
 
+@app.route('/operator/prepare', methods=['POST'])
 @app.route('/operator', methods=['POST'])
 def operator_command():
     """An atomic, sequenced command. Success means the arbiter acknowledged it."""
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(status='error', error='Expected a JSON object'), 400
     session, seq = data.get('session'), data.get('seq')
     if (not isinstance(session, str) or not 1 <= len(session) <= 80
             or type(seq) is not int or seq < 0
@@ -2312,7 +2361,13 @@ def operator_command():
     limit = ros_node.manual_thrust_limit
     data['left'] = max(-limit, min(limit, left))
     data['right'] = max(-limit, min(limit, right))
-    key = (session, seq)
+    # Each transport attempt gets its own receipt. A duplicate sequence is
+    # rejected by the arbiter, never reported as a fresh cached success.
+    if not isinstance(data.get('ticket', ''), str) or not isinstance(data.get('authority', ''), str):
+        return jsonify(status='error', error='Invalid control authorization'), 400
+    key = uuid.uuid4().hex
+    data['request_id'] = key
+    data['prepare'] = request.path == '/operator/prepare'
     ros_node.operator_pub.publish(String(data=json.dumps(data)))
     def receipt_ready():
         with telemetry_lock:
@@ -2325,87 +2380,73 @@ def operator_command():
                    error=result.get('reason'), operator=result), (200 if result.get('accepted') else 409)
 
 
+def _mission_snapshot():
+    with telemetry_lock:
+        if latest_mission_time is None or time.monotonic() - latest_mission_time > 2.0:
+            return None
+        return dict(latest_mission)
+
+
+def _mission_receipt(request_id):
+    def ready():
+        with telemetry_lock:
+            return request_id in mission_receipts
+    if not _await(ready):
+        return jsonify(status='error', error='Mission acknowledgement timed out; keep Hold and refresh status'), 504
+    with telemetry_lock:
+        result = mission_receipts[request_id]
+    return jsonify(status='ok' if result.get('accepted') else 'error',
+                   error=result.get('reason'), execution_id=result.get('execution_id'),
+                   state=result.get('state')), (200 if result.get('accepted') else 409)
+
+
 @app.route('/mission', methods=['POST'])
 def mission():
-    """Upload a route and report whether mission_manager accepted it.
-
-    A few quick checks give a clear error for common mistakes. Success means
-    boat/state reached EXECUTE.
-    """
-    data = request.get_json(silent=True) or {}
-    latitudes = data.get('latitudes', [])
-    longitudes = data.get('longitudes', [])
-    if not isinstance(latitudes, list) or not isinstance(longitudes, list) or not latitudes or len(latitudes) != len(longitudes):
-        return jsonify({'status': 'error', 'error': 'empty or mismatched lat/lon arrays'}), 400
+    """Accept only an individually identified route, never infer from EXECUTE."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(status='error', error='Expected a JSON object'), 400
+    latitudes, longitudes = data.get('latitudes'), data.get('longitudes')
+    if (not isinstance(latitudes, list) or not isinstance(longitudes, list) or
+            not 1 <= len(latitudes) <= 1000 or len(latitudes) != len(longitudes)):
+        return jsonify(status='error', error='Empty, oversized or mismatched waypoint arrays'), 400
     try:
-        latitudes = [float(x) for x in latitudes]
-        longitudes = [float(x) for x in longitudes]
-    except (TypeError, ValueError):
-        return jsonify({'status': 'error', 'error': 'lat/lon must be numbers'}), 400
-    if not all(math.isfinite(x) for x in latitudes + longitudes):
-        return jsonify({'status': 'error', 'error': 'lat/lon must be finite'}), 400
-
-    if not all(-90 <= x <= 90 for x in latitudes) or not all(-180 <= x <= 180 for x in longitudes):
-        return jsonify({'status': 'error', 'error': 'lat/lon out of range'}), 400
-    state, estopped, _mode = _snapshot()
-
-    # Quick rejections with a clear reason.
-    if estopped:
-        return jsonify({'status': 'error',
-                        'error': 'engine stop is engaged -- press Reset to Hold first',
-                        'state': state}), 409
-    if state not in ('IDLE', 'ABORTED'):
-        return jsonify({
-            'status': 'error',
-            'error': f'boat is {state}, not IDLE/ABORTED -- press Cancel to '
-                     f'return to IDLE, then send again',
-            'state': state}), 409
-
-    if not ros_node:
-        return jsonify({'status': 'error', 'error': 'ROS node not ready'}), 503
-
-    ros_node.publish_mission(latitudes, longitudes)
-
-    if not _await(lambda: _snapshot()[0] == 'EXECUTE'):
-        observed, _, _ = _snapshot()
-        return jsonify({
-            'status': 'error',
-            'error': f'mission was published but the boat never entered EXECUTE '
-                     f'(boat/state is {observed} after {CONTROL_ACK_TIMEOUT_SEC:.1f}s). '
-                     f'Check the mission_manager log.',
-            'state': observed}), 504
-
-    # Accepted. Warn if the manual lease is held, since the route will not
-    # drive until control is handed back.
-    _, _, mode = _snapshot()
-    warning = None
-    if mode in ('MANUAL', 'HOLD'):
-        warning = (f'Mission accepted, but control is {mode} -- press '
-                   f'"Continue Mission" to let the boat drive it.')
-    return jsonify({'status': 'ok', 'state': 'EXECUTE', 'mode': mode,
-                    'warning': warning})
+        latitudes, longitudes = list(map(float, latitudes)), list(map(float, longitudes))
+        if (not all(math.isfinite(v) and -90 <= v <= 90 for v in latitudes) or
+                not all(math.isfinite(v) and -180 <= v <= 180 for v in longitudes)):
+            raise ValueError()
+    except (ValueError, TypeError, OverflowError):
+        return jsonify(status='error', error='Invalid coordinates'), 400
+    status = _mission_snapshot()
+    if not ros_node or status is None:
+        return jsonify(status='error', error='Fresh mission-manager status required'), 503
+    request_id = uuid.uuid4().hex
+    ros_node.publish_mission(latitudes, longitudes, request_id, status)
+    return _mission_receipt(request_id)
 
 
 @app.route('/mission/cancel', methods=['POST'])
 def mission_cancel():
-    """Cancel the running mission and return to IDLE."""
-    if not ros_node:
-        return jsonify({'status': 'error', 'error': 'ROS node not ready'}), 503
-    ros_node.publish_mission_cancel()
-    if not _await(lambda: _snapshot()[0] not in ('EXECUTE',)):
-        observed, _, _ = _snapshot()
-        return jsonify({
-            'status': 'error',
-            'error': f'cancel published but boat/state is still {observed}',
-            'state': observed}), 504
-    observed, _, _ = _snapshot()
-    return jsonify({'status': 'ok', 'state': observed})
+    """A delayed cancel cannot cancel a different execution."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('execution_id'), str):
+        return jsonify(status='error', error='Execution identity is required'), 400
+    status = _mission_snapshot()
+    if not ros_node or status is None:
+        return jsonify(status='error', error='Fresh mission-manager status required'), 503
+    if data['execution_id'] != status.get('execution_id'):
+        return jsonify(status='error', error='Mission changed; refresh before cancelling'), 409
+    request_id = uuid.uuid4().hex
+    ros_node.publish_mission_cancel(request_id, status)
+    return _mission_receipt(request_id)
 
 
 @app.route('/estop', methods=['POST'])
 def estop():
     data = request.get_json(silent=True) or {}
-    active = bool(data.get('active', True))
+    if not isinstance(data, dict) or data.get('active', True) is not True:
+        return jsonify(status='error', error='Use the sequenced Reset to Hold control'), 400
+    active = True
     if not ros_node:
         return jsonify({'status': 'error', 'error': 'ROS node not ready'}), 503
     ros_node.publish_estop(active)
@@ -2536,6 +2577,7 @@ def telemetry():
             'state': latest_state,
             'mode': latest_mode,
             'operator': dict(latest_operator),
+            'mission': dict(latest_mission),
             'operator_age_s': (time.monotonic() - latest_operator_time
                                if latest_operator_time is not None else None),
             'geojson': latest_geojson,
@@ -2546,51 +2588,73 @@ def telemetry():
             'safety': latest_safety,
             'estop': latest_estop,
             'dock': dict(dock_point),
-            'recording': latest_recording,
+            'recording': dict(latest_recording, status_fresh=bool(latest_recording_time is not None and time.monotonic()-latest_recording_time < 3.0)),
             'dock_marker': latest_dock_marker,
             # Each is an empty dict when its publisher is absent, and the
             # page shows that as "no data".
             'failsafe': latest_failsafe,
             'heading_est': latest_heading,
             'camera': latest_camera,
+            'lidar': dict(latest_lidar, fresh=bool(latest_lidar.get('fresh') and latest_lidar_time is not None and time.monotonic()-latest_lidar_time < 2.0)),
             'power': _power_snapshot(),
             'system': latest_system,
         })
 
 
+def _queue_data_command(cmd):
+    if ros_node is None:
+        return jsonify({'status': 'error', 'error': 'ROS connection unavailable'}), 503
+    ros_node.publish_data_command(cmd)
+    return jsonify({'status': 'queued', 'confirmed': False,
+                    'detail': 'Request dispatched; check fresh recorder status for outcome'}), 202
+
+
 @app.route('/data/start', methods=['POST'])
 def data_start():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'status': 'error', 'error': 'JSON object required'}), 400
     cmd = {
         'action': 'start',
         'site': data.get('site') or 'unknown',
         'purpose': data.get('purpose', ''),
-        'source': data.get('source') or 'simulation',
+        'source': data.get('source') or 'unknown',
     }
-    if ros_node:
-        ros_node.publish_data_command(cmd)
-    return jsonify({'status': 'ok'})
+    return _queue_data_command(cmd)
 
 
 @app.route('/data/stop', methods=['POST'])
 def data_stop():
-    if ros_node:
-        ros_node.publish_data_command({'action': 'stop'})
-    return jsonify({'status': 'ok'})
+    return _queue_data_command({'action': 'stop'})
+
+
+@app.route('/data/save_name', methods=['POST'])
+def data_save_name():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'status': 'error', 'error': 'JSON object required'}), 400
+    name, run_id = data.get('name'), data.get('run_id')
+    if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80
+            or any(ord(c) < 32 for c in name)
+            or not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,160}', run_id)):
+        return jsonify({'status': 'error', 'error': 'Valid recording ID and name (1–80 characters) required'}), 400
+    return _queue_data_command({'action': 'save_name', 'run_id': run_id, 'name': name.strip()})
 
 
 @app.route('/data/marker', methods=['POST'])
 def data_marker():
-    data = request.get_json() or {}
-    if ros_node:
-        ros_node.publish_data_command({'action': 'marker', 'note': data.get('note', '')})
-    return jsonify({'status': 'ok'})
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'status': 'error', 'error': 'JSON object required'}), 400
+    return _queue_data_command({'action': 'marker', 'note': data.get('note', '')})
 
 
 @app.route('/detect/enable', methods=['POST'])
 def detect_enable():
     """Turn detector_node inference on or off (not just the displayed feed)."""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'status': 'error', 'error': 'JSON object required'}), 400
     enabled = bool(data.get('enabled', True))
     if ros_node:
         ros_node.publish_detect_enable(enabled)
@@ -2599,23 +2663,23 @@ def detect_enable():
 
 @app.route('/data/segment_begin', methods=['POST'])
 def data_segment_begin():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'status': 'error', 'error': 'JSON object required'}), 400
     label = data.get('label', '')
     # step_id is left for the recorder to generate.
-    if ros_node:
-        ros_node.publish_data_command({'action': 'segment_begin', 'label': label})
-    return jsonify({'status': 'ok'})
+    return _queue_data_command({'action': 'segment_begin', 'label': label})
 
 
 @app.route('/data/segment_end', methods=['POST'])
 def data_segment_end():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'status': 'error', 'error': 'JSON object required'}), 400
     step_id = data.get('step_id')
     if not step_id:
         return jsonify({'status': 'error', 'error': 'step_id required'}), 400
-    if ros_node:
-        ros_node.publish_data_command({'action': 'segment_end', 'step_id': step_id})
-    return jsonify({'status': 'ok'})
+    return _queue_data_command({'action': 'segment_end', 'step_id': step_id})
 
 
 @app.route('/dock', methods=['POST'])
@@ -2639,19 +2703,26 @@ def set_dock():
     return jsonify({'status': 'ok'})
 
 
+def _encode_jpeg(frame):
+    ok, data = cv2.imencode('.jpg', frame)
+    if not ok:
+        raise ValueError('JPEG encoding failed')
+    return data.tobytes()
+
+
+def _stale_jpeg():
+    frame = np.zeros((180, 480, 3), dtype=np.uint8)
+    cv2.putText(frame, 'NO FRESH VIDEO', (35, 95), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (180, 180, 220), 2)
+    return _encode_jpeg(frame)
+
+
+video_stream = SharedVideo(_encode_jpeg, _stale_jpeg())
+detections_stream = SharedVideo(_encode_jpeg, _stale_jpeg(), max_hz=5.)
+
+
 def generate_frames():
-    global latest_frame
-    while True:
-        with frame_lock:
-            frame = latest_frame
-        if frame is None:
-            # No frame yet, sleep instead of spinning.
-            time.sleep(0.05)
-            continue
-        ret, buffer = cv2.imencode('.jpg', frame)
-        frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+    yield from video_stream.stream()
 
 
 @app.route('/video_feed')
@@ -2661,19 +2732,7 @@ def video_feed():
 
 
 def generate_detections_frames():
-    """Like generate_frames() but for the detector overlay. Yields nothing
-    if detector_node is not running."""
-    global latest_detections_frame
-    while True:
-        with detections_frame_lock:
-            frame = latest_detections_frame
-        if frame is None:
-            time.sleep(0.05)
-            continue
-        ret, buffer = cv2.imencode('.jpg', frame)
-        frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+    yield from detections_stream.stream()
 
 
 @app.route('/detections_feed')
@@ -2701,6 +2760,7 @@ class WebServerNode(Node):
         self.thrust_pub = self.create_publisher(ThrustCommand, 'boat/cmd/manual', 10)
         self.operator_pub = self.create_publisher(String, 'boat/operator_command', 10)
         self.create_subscription(String, 'boat/operator_status', self.operator_callback, 10)
+        self.create_subscription(String, 'boat/mission_status', self.mission_status_callback, 10)
         self.mission_pub = self.create_publisher(MissionCommand, 'boat/mission_command', 10)
         self.estop_pub = self.create_publisher(Bool, 'boat/estop', 10)
         # Manual lease: MANUAL / RELEASE / RESUME, see boat_control/arbitration.py.
@@ -2708,7 +2768,7 @@ class WebServerNode(Node):
             String, 'boat/cmd/control_mode', 10)
         # Operator mission cancel.
         self.mission_cancel_pub = self.create_publisher(
-            Empty, 'boat/mission_cancel', 10)
+            String, 'boat/mission_cancel', 10)
         # data_recorder control, see publish_data_command().
         self.data_command_pub = self.create_publisher(String, 'boat/data_command', 10)
         # detector_node inference on/off.
@@ -2751,6 +2811,7 @@ class WebServerNode(Node):
         self.camera_status_sub = self.create_subscription(
             CameraStatus, 'boat/camera/status', self.camera_status_callback, 10)
         # Battery and current readings from power_monitor.
+        self.create_subscription(String, 'boat/lidar/status', self.lidar_status_callback, 10)
         self.power_sub = self.create_subscription(
             PowerStatus, 'boat/power_status', self.power_callback, 10)
         self.system_sub = self.create_subscription(
@@ -2765,6 +2826,23 @@ class WebServerNode(Node):
 
         self.get_logger().info('Web dashboard node started, dashboard at :5000')
 
+    def mission_status_callback(self, msg):
+        global latest_mission, latest_mission_time
+        try:
+            data = json.loads(msg.data)
+            if not isinstance(data, dict):
+                return
+        except (ValueError, TypeError):
+            return
+        with telemetry_lock:
+            latest_mission = data
+            latest_mission_time = time.monotonic()
+            key = data.get('request_id')
+            if isinstance(key, str):
+                mission_receipts[key] = data
+                while len(mission_receipts) > 256:
+                    del mission_receipts[next(iter(mission_receipts))]
+
     def operator_callback(self, msg):
         global latest_operator, latest_operator_time
         try:
@@ -2776,22 +2854,23 @@ class WebServerNode(Node):
         with telemetry_lock:
             latest_operator = data
             latest_operator_time = time.monotonic()
-            if data.get('request_session') is not None:
-                operator_receipts[(data['request_session'], data['request_seq'])] = data
+            if isinstance(data.get('request_id'), str):
+                operator_receipts[data['request_id']] = data
                 while len(operator_receipts) > 256:
                     del operator_receipts[next(iter(operator_receipts))]
 
+    def _video_input(self, msg, stream):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            stream.put(frame)
+        except Exception as exc:
+            self.get_logger().warn(f'Invalid video frame: {exc}', throttle_duration_sec=5.0)
+
     def image_callback(self, msg):
-        global latest_frame
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        with frame_lock:
-            latest_frame = frame
+        self._video_input(msg, video_stream)
 
     def detections_image_callback(self, msg):
-        global latest_detections_frame
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        with detections_frame_lock:
-            latest_detections_frame = frame
+        self._video_input(msg, detections_stream)
 
     def gps_callback(self, msg: NavSatFix):
         if msg.status.status < 0:  # STATUS_NO_FIX
@@ -2908,6 +2987,18 @@ class WebServerNode(Node):
                 'detail': msg.detail or None,
             }
 
+    def lidar_status_callback(self, msg):
+        global latest_lidar, latest_lidar_time
+        try:
+            value = json.loads(msg.data)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(value, dict):
+            return
+        with telemetry_lock:
+            latest_lidar = value
+            latest_lidar_time = time.monotonic()
+
     def camera_status_callback(self, msg: CameraStatus):
         global latest_camera
         with telemetry_lock:
@@ -2961,13 +3052,14 @@ class WebServerNode(Node):
             latest_estop = bool(msg.data)
 
     def recording_status_callback(self, msg: String):
-        global latest_recording
+        global latest_recording, latest_recording_time
         try:
             parsed = json.loads(msg.data)
         except (json.JSONDecodeError, TypeError):
             return
         with telemetry_lock:
             latest_recording = parsed
+            latest_recording_time = time.monotonic()
 
     def dock_marker_detected_callback(self, msg: Bool):
         global latest_dock_marker
@@ -3013,11 +3105,16 @@ class WebServerNode(Node):
     def publish_control_mode(self, mode):
         self.control_mode_pub.publish(String(data=str(mode)))
 
-    def publish_mission_cancel(self):
-        self.mission_cancel_pub.publish(Empty())
+    def publish_mission_cancel(self, request_id, status):
+        self.mission_cancel_pub.publish(String(data=json.dumps({
+            'request_id': request_id, 'execution_id': status['execution_id'],
+            'manager_id': status['manager_id'], 'generation': status['generation']})))
 
-    def publish_mission(self, latitudes, longitudes):
+    def publish_mission(self, latitudes, longitudes, execution_id, status):
         msg = MissionCommand()
+        msg.execution_id = execution_id
+        msg.manager_id = status['manager_id']
+        msg.generation = status['generation']
         msg.latitudes = [float(x) for x in latitudes]
         msg.longitudes = [float(x) for x in longitudes]
         self.mission_pub.publish(msg)
@@ -3079,21 +3176,8 @@ def get_reachable_ips():
 
 
 def run_flask():
-    # No authentication, and it binds to all interfaces: anyone on the
-    # network can drive the boat. Only use on a trusted network.
-    print('WARNING: boat_web_ui has no authentication and is listening on 0.0.0.0:5000')
-
-    # Print every candidate URL since the Pi's IP changes with the network.
-    ips = get_reachable_ips()
-    if ips:
-        print('Dashboard reachable at:')
-        for ip in ips:
-            print('  http://%s:5000' % ip)
-    else:
-        print('Could not auto-detect an IP address -- run `hostname -I` '
-              'on the Pi manually and open http://<that IP>:5000')
-
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    print('ASV dashboard: http://127.0.0.1:5000; remote access requires SSH forwarding.')
+    app.run(host='127.0.0.1', port=5000, threaded=True)
 
 
 def main(args=None):
@@ -3106,11 +3190,11 @@ def main(args=None):
 
     try:
         rclpy.spin(ros_node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         ros_node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

@@ -5,7 +5,7 @@ brief and checksums. Segment boundaries are tagged both in the bag
 (boat/data_events) and in the manifest, so a bag describes itself and runs
 can be searched without opening them. Post-processing is done offline.
 
-Not in any launch file. Start it with:
+Included in hardware bring-up; recording remains idle until Start. Standalone:
 
     ros2 run boat_data data_recorder
 
@@ -21,6 +21,8 @@ Control it with JSON on boat/data_command:
 import hashlib
 import json
 import os
+import re
+import math
 import shutil
 import signal
 import subprocess
@@ -29,8 +31,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String
+
+from boat_data.library import recording_library, name_recording
 
 from boat_data.write_watch import (
     DEFAULT_RATE_EMA_ALPHA,
@@ -58,6 +63,7 @@ DEFAULT_TOPICS = [
     # Control: the arbiter's inputs and mode as well as its output, so every
     # thrust value in the bag says who was driving.
     '/boat/thrust_command',
+    '/boat/motor/status',
     '/boat/cmd/manual',
     '/boat/cmd/waypoint',
     '/boat/cmd/failsafe',
@@ -65,6 +71,9 @@ DEFAULT_TOPICS = [
     '/boat/state',
     '/boat/mission_active',
     '/boat/mission_feedback',
+    '/boat/mission_status',
+    '/boat/operator_command',
+    '/boat/operator_status',
 
     # Safety
     '/boat/safety_status',
@@ -82,13 +91,21 @@ DEFAULT_TOPICS = [
 
     # Events
     '/boat/data_events',
+    '/boat/lidar/points_raw',
+    '/boat/lidar/driver_status',
+    '/boat/lidar/status',
+    '/boat/localization/gps_enu',
+    '/boat/localization/imu',
+    '/boat/localization/odometry',
+    '/boat/localization/status',
+    '/tf', '/tf_static', '/clock',
 ]
 
 # Topics with no publisher on the current platform are simply empty. The
 # manifest's topics_requested field records what was asked for.
 
 # Refuse to start a run below this much free space (GB). 2 GB is only
-# 15-20 minutes at 6-8 GB/hour of 640x480 10 fps imagery, so raise it for
+# about 3.6 minutes at 33 GB/hour of raw 640x480 bgr8 10 fps, before LiDAR. Raise it for
 # real runs:
 #   ros2 run boat_data data_recorder --ros-args -p min_free_gb:=20.0
 MIN_FREE_GB_TO_START = 2.0
@@ -135,6 +152,16 @@ class DataRecorder(Node):
         # Parameter, see MIN_FREE_GB_TO_START.
         self.declare_parameter('min_free_gb', MIN_FREE_GB_TO_START)
         self.declare_parameter('write_stall_warn_sec', WRITE_STALL_WARN_SEC)
+        self.declare_parameter('stop_free_gb', 1.0)
+        self.declare_parameter('max_bag_size_bytes', 1000000000)
+        self.declare_parameter('qos_overrides_path', '')
+        self.declare_parameter('calibration_file', '')
+        reserve = float(self.get_parameter('stop_free_gb').value)
+        start = float(self.get_parameter('min_free_gb').value)
+        if not (math.isfinite(reserve) and math.isfinite(start) and 0 < reserve < start):
+            raise ValueError('Require 0 < stop_free_gb < min_free_gb')
+        if int(self.get_parameter('max_bag_size_bytes').value) < 1000000:
+            raise ValueError('max_bag_size_bytes must be at least one MB')
 
         self.data_root = Path(self.get_parameter('data_root').value)
         self.runs_dir = self.data_root / 'runs'
@@ -146,6 +173,9 @@ class DataRecorder(Node):
         self.events_pub = self.create_publisher(String, 'boat/data_events', 10)
         self.status_pub = self.create_publisher(String, 'boat/recording_status', 10)
 
+        self.last_command_result = None
+        self._library_cache = []
+        self._library_at = 0.0
         self.proc = None
         self.run_id = None
         self.run_dir = None
@@ -176,9 +206,13 @@ class DataRecorder(Node):
             self.get_logger().warn('data_command must be a JSON object')
             return
         action = cmd.get('action')
+        if not isinstance(action, str):
+            self.get_logger().warn('data_command action must be a string')
+            return
         handlers = {
             'start': self.start_run,
             'stop': lambda c: self.stop_run(c),
+            'save_name': self.save_name,
             'marker': self.add_marker,
             'tag': self.add_tag,
             'segment_begin': self.segment_begin,
@@ -191,7 +225,15 @@ class DataRecorder(Node):
         try:
             handler(cmd)
         except Exception as exc:  # noqa: BLE001 - never let a bad command kill recording
+            self.last_command_result = {'action': action, 'ok': False, 'detail': str(exc), 'at': time.monotonic()}
             self.get_logger().error('data_command %r failed: %s' % (action, exc))
+
+    def save_name(self, cmd):
+        name = name_recording(self.runs_dir, cmd.get('run_id'), cmd.get('name'),
+                              self.run_id if self.proc is not None else None)
+        self._library_at = 0.0
+        self.last_command_result = {'action': 'save_name', 'ok': True,
+                                    'run_id': cmd['run_id'], 'detail': 'Name saved: ' + name, 'at': time.monotonic()}
 
     # Run lifecycle
 
@@ -209,15 +251,15 @@ class DataRecorder(Node):
             return
         # Log the implied run length at the start.
         self.get_logger().info(
-            '%.1f GB free -- roughly %.0f minutes of imagery at ~7 GB/hour.'
-            % (free_gb, free_gb / 7.0 * 60.0))
+            '%.1f GB free; remaining duration requires measured camera/LiDAR write rate.'
+            % free_gb)
 
         # Reset the write watcher so a previous run can't make this one look
         # healthy.
         self.write_watch.reset()
         self._last_obs = None
 
-        site = cmd.get('site', 'unknown')
+        site = re.sub(r'[^A-Za-z0-9_-]', '_', str(cmd.get('site', 'unknown')))[:64] or 'unknown'
         seq = self._next_sequence()
         self.run_id = '%s_%s_run%03d' % (utc_now_compact(), site, seq)
         self.run_dir = self.runs_dir / self.run_id
@@ -229,12 +271,16 @@ class DataRecorder(Node):
 
         args = ['ros2', 'bag', 'record', '--storage', 'mcap',
                 '--output', str(self.run_dir / 'bag' / 'rosbag2')]
+        args += ['--max-bag-size', str(int(self.get_parameter('max_bag_size_bytes').value))]
+        qos = self.get_parameter('qos_overrides_path').value
+        if qos:
+            args += ['--qos-profile-overrides-path', str(qos)]
         if preset:
             args += ['--storage-preset-profile', preset]
         if record_all:
             args += ['--all']
         else:
-            args += topics
+            args += ['--topics'] + topics
 
         self.get_logger().info('Starting recording: %s' % self.run_id)
         try:
@@ -250,7 +296,7 @@ class DataRecorder(Node):
         self.manifest = {
             'run_id': self.run_id,
             'schema_version': '1.0',
-            'source': cmd.get('source', 'simulation'),
+            'source': cmd.get('source', 'unknown'),
             'site': site,
             'purpose': cmd.get('purpose', ''),
             'started_utc': self.started_at,
@@ -265,6 +311,14 @@ class DataRecorder(Node):
             'markers': [],
             'quality': {},
         }
+        calibration = self.get_parameter('calibration_file').value
+        if calibration:
+            try:
+                shutil.copyfile(calibration, self.run_dir / 'calibration.json')
+                self.manifest['calibration_sha256'] = sha256_of(self.run_dir / 'calibration.json')
+            except OSError as exc:
+                self.get_logger().error('Calibration copy failed: %s' % exc)
+                self.manifest['calibration_error'] = str(exc)
         self.open_segments = {}
         self._write_manifest()
 
@@ -299,9 +353,11 @@ class DataRecorder(Node):
         except (ProcessLookupError, PermissionError) as exc:
             self.get_logger().warn('Could not signal recorder group: %s' % exc)
 
+        forced = False
         try:
             self.proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
+            forced = True
             self.get_logger().error(
                 'Recorder did not exit within 20s of SIGINT -- killing. The bag '
                 'may be missing its index and should be checked before use.')
@@ -309,14 +365,17 @@ class DataRecorder(Node):
                 os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+            self.proc.wait(timeout=5)  # Do not hash a file still owned by a live writer.
         self.proc = None
 
         ended = utc_now_iso()
         self.manifest['ended_utc'] = ended
         self.manifest['duration_s'] = self._elapsed_s()
         self.manifest['quality'] = self._collect_quality()
+        self.manifest['quality']['forced_shutdown'] = forced
         self._write_manifest()
         self._write_checksums()
+        self._library_at = 0.0
 
         self.get_logger().info(
             'Run archived: %s (%.0fs)' % (self.run_dir, self.manifest['duration_s'] or 0.0))
@@ -331,6 +390,9 @@ class DataRecorder(Node):
         if not self._recording('segment_begin'):
             return
         step_id = cmd.get('step_id') or 'step_%d' % len(self.manifest['segments'])
+        if any(segment['step_id'] == step_id for segment in self.manifest['segments']):
+            self.get_logger().warn('Duplicate segment id %r ignored' % step_id)
+            return
         seg = {
             'step_id': step_id,
             'label': cmd.get('label', ''),
@@ -462,7 +524,13 @@ class DataRecorder(Node):
 
     def _emit_event(self, payload):
         payload['t_utc'] = utc_now_iso()
-        self.events_pub.publish(String(data=json.dumps(payload)))
+        # Finalization must continue after ROS signal handlers close the context.
+        if rclpy.ok():
+            try:
+                self.events_pub.publish(String(data=json.dumps(payload)))
+            except Exception:
+                if rclpy.ok():
+                    raise
 
     def _bag_bytes_now(self):
         """Total bytes under this run's bag/ directory, or None.
@@ -520,6 +588,8 @@ class DataRecorder(Node):
                 self.manifest['quality'] = self._collect_quality()
                 self.manifest['quality']['unexpected_exit'] = True
                 self._write_manifest()
+                self._write_checksums()
+                self._library_at = 0.0
 
         obs = self._update_write_watch(now) if recording else None
 
@@ -528,13 +598,26 @@ class DataRecorder(Node):
         except OSError:
             free_gb = None
 
+        if recording and free_gb is not None and free_gb < float(self.get_parameter('stop_free_gb').value):
+            self.get_logger().error('Storage reserve reached; finalizing recording')
+            self.manifest.setdefault('storage', {})['stop_reason'] = 'LOW_DISK'
+            self.stop_run()
+            recording = False
+            obs = None
+
         # Minutes left at the observed write rate.
         est_minutes = None
         if free_gb is not None:
             mins = self.write_watch.minutes_remaining(free_gb * 1e9)
             est_minutes = round(mins, 1) if mins is not None else None
 
+        if now - self._library_at >= 5.0:
+            self._library_cache = recording_library(self.runs_dir, self.run_id if recording else None)
+            self._library_at = now
         self.status_pub.publish(String(data=json.dumps({
+            'library': self._library_cache,
+            'library_limit': 100,
+            'command_result': self.last_command_result,
             'recording': recording,
             # recording: a recorder process exists.
             # writing:   bytes reached the disk in the last second.
@@ -565,11 +648,11 @@ def main(args=None):
     node = DataRecorder()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

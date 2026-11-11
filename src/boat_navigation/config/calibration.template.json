@@ -1,0 +1,12 @@
+{
+  "verified": false,
+  "calibration_id": "REPLACE_AFTER_MEASUREMENT",
+  "datum": [null, null, null],
+  "gps_variance_m2": null,
+  "gyro_variance_rad2_s2": null,
+  "transforms": {
+    "gps_frame": {"xyz_m": [null, null, null], "rpy_rad": [null, null, null]},
+    "imu_frame": {"xyz_m": [null, null, null], "rpy_rad": [null, null, null]},
+    "lidar_frame": {"xyz_m": [null, null, null], "rpy_rad": [null, null, null]}
+  }
+}

@@ -506,7 +506,7 @@ def test_haversine_sanity():
 
 def test_manual_operator_outranks_the_failsafe():
     """An operator holding the manual lease outranks the RTL controller."""
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
     a.on_manual_thrust(80.0, 20.0, t)
@@ -518,7 +518,7 @@ def test_manual_operator_outranks_the_failsafe():
 
 def test_hold_stops_even_failsafe_recovery():
     """An operator's Hold is always zero propulsion, including during RTL."""
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_control_mode(CMD_MANUAL, t)
     a.on_control_mode(CMD_RELEASE, t)        # -> HOLD, latched zero
@@ -531,7 +531,7 @@ def test_hold_stops_even_failsafe_recovery():
 
 
 def test_failsafe_outranks_the_waypoint_follower():
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_waypoint_thrust(60.0, 60.0, t)
     assert a.evaluate(t)[2] == MODE_WAYPOINT
@@ -544,7 +544,7 @@ def test_failsafe_outranks_the_waypoint_follower():
 def test_powered_stop_zeroes_rather_than_falling_through_to_autonomy():
     """POWERED_STOP publishes no thrust but must still outrank the waypoint
     follower."""
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_waypoint_thrust(60.0, 60.0, t)
     a.on_failsafe_level(LEVEL_POWERED_STOP, t)
@@ -553,7 +553,7 @@ def test_powered_stop_zeroes_rather_than_falling_through_to_autonomy():
 
 
 def test_estop_outranks_the_failsafe_in_the_arbiter_too():
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_failsafe_level(LEVEL_RETURN_TO_LAUNCH, t)
     a.on_failsafe_thrust(45.0, 30.0, t)
@@ -564,7 +564,7 @@ def test_estop_outranks_the_failsafe_in_the_arbiter_too():
 
 def test_stale_failsafe_level_stays_stopped():
     """A dead supervisor must not silently hand control back to navigation."""
-    a = ControlArbitration(failsafe_timeout_sec=3.0)
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False, failsafe_timeout_sec=3.0)
     t = 0.0
     a.on_waypoint_thrust(60.0, 60.0, t)
     a.on_failsafe_level(LEVEL_POWERED_STOP, t)
@@ -575,7 +575,7 @@ def test_stale_failsafe_level_stays_stopped():
         t += 0.2
         a.on_waypoint_thrust(60.0, 60.0, t)
         mode = a.evaluate(t)[2]
-    assert mode == MODE_FAILSAFE
+    assert mode == 'HOLD'
     assert a.evaluate(t)[:2] == (0.0, 0.0)
     assert a.failsafe_expiries == 1
 
@@ -583,7 +583,7 @@ def test_stale_failsafe_level_stays_stopped():
 def test_failsafe_holds_zero_if_its_thrust_gaps():
     """The level says the failsafe is driving but its commands have
     gapped. Hold zero rather than hand the boat back mid-recovery."""
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     t = 0.0
     a.on_waypoint_thrust(60.0, 60.0, t)
     a.on_failsafe_level(LEVEL_RETURN_TO_LAUNCH, t)
@@ -606,7 +606,7 @@ def scenario_breach_and_recovery():
     which must stop and say why."""
     log = []
     sup = make_supervisor()
-    a = ControlArbitration()
+    a = ControlArbitration(allow_legacy=True, require_supervisor=False)
     good_heading(sup, deg=0.0)
     t = 0.0
 

@@ -1,117 +1,148 @@
-# Operator handover: Manual, Hold and Continue
+# Operator control contract
 
-Implemented on `fix/operator-handover`, based on `106f83d` (12 October 2026).
-Validated offline; not deployed to the Pi or tested on live ROS/hardware.
+Updated 7 November 2026 on `fix/operator-handover`. Local implementation and
+offline verification only; not deployed to the Pi or tested with motors.
 
-## What the operator can expect
+## Operator behavior
 
-| Action | Propulsion/control | Existing mission |
-| --- | --- | --- |
-| Take Manual, or press WASD | Manual control after acknowledgement; releasing keys requests neutral | Paused at the same target |
-| Start Mission | Hold first, accept route, then explicitly hand over to navigation | Starts a new route; refuses to replace an existing route |
-| Hold | Zero commanded thrust, including during return-to-launch recovery | Retained |
-| Continue Mission | Explicitly returns control to autonomy, subject to safety stops | Continues the remaining route |
-| Cancel Mission | Hold first, then cancel | Removed |
-| Engine Stop | Emergency stop requested; mission aborts | Aborted, not resumable |
-| Reset to Hold | Clears emergency stop but leaves propulsion held | Does not restart anything |
-| Lost operator heartbeat | Hold latches; restored heartbeats alone cannot resume | Retained |
-| Leave/hide/blur the Pilot page | Requests Hold; watchdog is the fallback | Retained |
+| Situation/action | Result |
+| --- | --- |
+| Arbiter starts or restarts | HOLD, zero commanded thrust; no automatic arming |
+| Take Manual / WASD | Acknowledged manual authority; release keys for neutral |
+| Hold | Zero thrust, retained route and target |
+| Start Mission | Hold, identified route acceptance, then explicit AUTO |
+| Continue Mission | Fresh authorization; continue retained route |
+| Cancel Mission / Cancel + Clear Route | Hold, cancel the identified execution, clear drawing after acknowledgement |
+| Clear Points | Clears the unsubmitted draft points |
+| E-stop | Stops regardless of which browser previously owned control; aborts mission |
+| Reset to Hold | Clears e-stop through the sequenced protocol; does not resume |
+| Lost command heartbeat | HOLD after the one-second lease timeout; reconnection cannot silently resume |
+| Missing or stale safety supervision | Motion refused / HOLD |
+| Safety restriction clears | Explicit Continue required; no automatic mission resumption |
 
-Hold is **zero thrust**, not station keeping. Wind and current can move the boat.
-The motor bars show requested manual thrust, not measured motor output.
-“Hide Route Drawing” only hides a map overlay; “Cancel Mission” cancels navigation.
-Return Dock starts a new one-point route and therefore requires cancelling an
-existing mission first. It does not silently discard the retained route.
+Hold means zero propulsion, not station keeping. Current and wind can still move
+the boat. Dashboard motor bars are requested thrust, not measured motor output.
 
-## Why both bugs and logic needed fixing
+Manual recovery is permitted for supervisor-identified navigation restrictions
+such as geofence/link recovery, including degraded recovery without navigation
+sensors. It still needs a fresh supervisor and a working operator command link.
+E-stop, level-4 stop, and a level-3 stop without explicit manual-recovery permission
+block manual thrust. This does not add electrical fault detection: future fault
+sources must explicitly withhold recovery permission.
 
-The previous browser code sent thrust and control mode independently. Resume
-could send RESUME before a previous asynchronous RELEASE finished; that late
-RELEASE then put the boat back in Hold. Failures on manual heartbeats were
-ignored, and the UI optimistically claimed control before the arbiter confirmed it.
+The command-link policy is HOLD in both MANUAL and AUTO. The existing safety
+controller's return-to-launch capability does not override that Hold. Autonomous
+return after loss of the operator link remains a separate policy decision.
 
-The navigation loop could progress waypoints during manual control, and the
-mission timeout kept running during detours. Hold also allowed recovery thrust.
-Native browser dialogs blocked drive timers. These were inconsistent meanings
-of pause, stop and ownership, not just cosmetic UI problems.
+## How the pieces fit
 
-## Implementation
+```mermaid
+flowchart LR
+    B[Browser controls] -->|HTTP prepare / command| W[Web gateway]
+    W -->|Identified request| A[Control arbiter]
+    A -->|Exact receipt + authority| W
+    W -->|Acknowledgement| B
+    W -->|Route / cancel identity| M[Mission manager]
+    M -->|Accepted route + execution status| N[Waypoint follower]
+    N -->|Waypoint thrust| A
+    N -->|Feedback + execution ID| M
+    S[Safety supervisor] -->|Level + recovery permission| A
+    S -->|Recovery thrust| A
+    A -->|Selected thrust or zero| D[Motor output path]
+```
 
-- `POST /operator` sends one `boat/operator_command` String JSON message containing
-  `session`, increasing `seq`, `intent`, `transition`, `left` and `right`.
-  `boat/operator_status` carries the exact request receipt and actual arbiter mode.
-  The server returns success only after a matching arbiter acknowledgement.
-- Sequence numbers reject older commands within a session. Browser revisions also
-  prevent old responses from changing newer UI decisions. Explicit takeover retires
-  the previous session so its outstanding requests cannot reclaim ownership.
-- MANUAL and AUTO heartbeats renew authority every 200 ms, with one renewal in
-  flight. Missing renewals latch Hold after the configured lease timeout (default
-  1 s, detected on a 20 Hz steady-clock timer). Manual thrust has an additional
-  0.5 s freshness check. These are software thresholds, not measured motor-stop times.
-- A renewal cannot re-arm an expired lease. The operator must explicitly select
-  Manual or Continue again. A new AUTO transition requires a fresh navigation sample.
-- Waypoint progress and fly-by detection pause outside fresh IDLE/WAYPOINT mode.
-  Manual/Hold time is excluded from the existing mission timeout. The remaining
-  route and target index are kept in memory.
-- Priority is e-stop, operator Hold, safety stop, manual, recovery, waypoint, zero.
-  Manual can override return-to-launch steering but cannot override a safety stop.
-  An established safety-monitor stream going stale now stops instead of failing open.
-- The Pilot page uses inline notices. Its errors and safety override reason input
-  no longer open blocking browser dialogs. Manual controls remain available while
-  route requests are pending; duplicate route submissions are suppressed.
+The browser requests control; the arbiter decides whether it is allowed. The
+mission manager decides which route exists. The follower calculates steering only
+for that execution and pauses progress while manual control or Hold is active.
+The safety supervisor supplies restrictions and recovery steering. All commanded
+propulsion passes through the arbiter.
 
-## Compatibility and limits
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Gateway
+    participant Arbiter
+    Browser->>Gateway: Prepare MANUAL/AUTO/RESET
+    Gateway->>Arbiter: Request with unique receipt ID
+    Arbiter-->>Gateway: One-use ticket, expires in 1 second
+    Gateway-->>Browser: Prepared (no motion)
+    Browser->>Gateway: Same action + ticket
+    Gateway->>Arbiter: Deliver action with new receipt ID
+    Arbiter-->>Browser: Via gateway: accepted + current authority
+    Browser->>Arbiter: Via gateway: sequenced heartbeats + authority
+    Note over Browser,Arbiter: Hold, expiry, takeover or restart invalidates old authority
+```
 
-Update `boat_control`, `boat_navigation` and `boat_web_ui` together, rebuild, restart
-their nodes and reload the dashboard. The JS file is included as package data.
-An old web server cannot use the new protocol, and a new web server will report
-missing acknowledgements against an old arbiter.
+Ticket expiry uses the arbiter's monotonic clock. The browser also refuses a
+preparation taking one second or longer. Tickets are bound to the action payload
+and consumed once. Sequence numbers order commands within an owner session;
+authority generations prevent old renewals from reclaiming a newer session.
+HOLD and e-stop do not require a motion ticket. These mechanisms prevent stale
+control actions; they are not authentication or encryption.
 
-Legacy `boat/cmd/manual` and `boat/cmd/control_mode` inputs still work before a
-dashboard session acquires authority. They are rejected afterward so old clients
-cannot override that owner. Existing command-line startup remains AUTO for
-compatibility: arbiter restart and retained publishers need a separate live
-restart test before deployment. This change does not provide persistent ownership
-across process restarts, authentication, hardware emergency isolation, or mission
-IDs for correlating arbitrary delayed route feedback. Mission acceptance timeout
-is reported as uncertain; stay held and inspect actual mission state before retrying.
+Each HTTP attempt gets a fresh request ID, so cached success for an earlier
+attempt cannot confirm a command that was never delivered. Timeouts mean an
+uncertain outcome: remain held and inspect current state before retrying.
 
-The dashboard link-loss policy is now Hold, including during AUTO. That deliberately
-blocks the recovery controller from moving the boat after an operator link loss.
-Autonomous return on link loss would need a separate, explicit policy.
+Mission requests carry the manager instance and expected generation. The manager
+assigns a fresh execution ID to each accepted route. Completion, cancellation and
+follower status must match that execution. The follower requires matching status
+no older than 1.5 seconds; an old completion cannot finish a replacement route.
+Manager restart invalidates queued requests from the previous instance.
 
-## Offline verification
+## Code reading order
 
-77 checks passed on 22 October 2026: 16 existing control checks, 31 failsafe
-checks (including the intentionally revised Hold/stale-supervisor expectations),
-11 handover/navigation checks, 5 endpoint/adapter checks and 14 JavaScript checks.
-All changed Python files also passed syntax parsing; `git diff --check` passed.
+1. `src/boat_web_ui/boat_web_ui/operator_controls.js`: transition preparation,
+   acknowledgements, heartbeat and stale-response handling.
+2. `src/boat_control/boat_control/arbitration.py`: `on_operator_command()` and
+   `evaluate()` implement authority and propulsion selection.
+3. `src/boat_control/boat_control/control_arbiter.py`: ROS adapter and receipts.
+4. `src/boat_control/boat_control/mission_state.py` and `mission_manager.py`:
+   execution identity, acceptance, cancellation and timeout.
+5. `src/boat_navigation/boat_navigation/waypoint_follower.py`: identity/freshness
+   gates and progress pause.
+6. `src/boat_web_ui/boat_web_ui/web_server.py`: HTTP validation and exact receipts.
 
-From the repository root, with Python 3 and Node available:
+## Build compatibility
+
+Rebuild the complete workspace and restart the participating nodes together.
+`boat_msgs/MissionCommand` and `boat_msgs/FailsafeState` changed. Mission cancel
+is now String JSON instead of Empty; feedback is identified JSON instead of an
+anonymous string. Reload the browser after installation. Mixed old/new nodes are
+unsupported. `boat/mission_status`, `boat/operator_command` and
+`boat/operator_status` are now included in recorder defaults.
+
+Legacy split manual/control-mode inputs are disabled in the production arbiter.
+Some old unit fixtures explicitly enable compatibility behavior; they do not
+describe production startup. Raw old CLI mission messages no longer work.
+
+## Offline verification and remaining validation
+
+Final offline run: **109 targeted checks passed**, all 61 Python source files
+parsed, and `git diff --check` passed. The test log is in the desktop work folder
+at `outputs/asv-control-verification-2026-11-07/test-results.txt`.
+
+Run these from the repository root with Python 3 and Node:
 
 ```sh
 python3 src/boat_control/test/test_control_logic.py
 python3 src/boat_control/test/test_failsafe_logic.py
 python3 src/boat_control/test/test_operator_handover.py
+python3 src/boat_control/test/test_control_contract.py
+python3 src/boat_control/test/test_mission_protocol.py
 python3 src/boat_web_ui/test/test_operator_endpoint.py
 node --test src/boat_web_ui/test/operator_controls.test.cjs src/boat_web_ui/test/pilot_page.test.cjs
 ```
 
-Set `PYTHON` if the page test needs a different Python executable. These tests
-cover pure arbitration, pause timing, actual follower methods with transport
-stubbed, endpoint/adapter acknowledgement handling with in-memory transport,
-and actual composed page JavaScript with a fake DOM, map and network.
-They do not test DDS delivery, Flask HTTP serving, browser rendering, the installed
-ROS package, Wi-Fi latency or motor firmware.
+Set `PYTHON` to the Python executable for the composed-page test. These cover pure
+logic, actual adapter methods with in-memory transport, and actual page JavaScript
+with a fake DOM/map/network. They do not exercise real Flask HTTP, ROS/DDS, Wi-Fi,
+firmware, or physical stopping time. ROS/ament dependencies are unavailable on
+this desktop; the ROS lint suite and generated interface build remain unverified.
 
-## Next verification before propulsion
-
-Run the updated control/mission/navigation/web nodes against simulated GPS and
-heading, without motor_driver or any hardware connection. Observe actual
-`boat/thrust_command`, `boat/mode`, `boat/state` and `boat/nav_status` through the
-complete Manual → Start Mission → Manual → Hold → Continue → Cancel sequence.
-Verify that the target index does not advance during a manual detour, and that
-late/reordered packets, closing the tab, Wi-Fi interruption, node restarts,
-e-stop/reset and stale sensor feeds produce the stated behavior.
-Then check the motor controller's independent watchdog and stop path on the bench.
-Offline tests passing is not water-test clearance.
+Before propulsion, rebuild and run the full stack in simulation without the motor
+node. Use `scripts/sim/verify_control_loop.sh`, then specifically test stopped
+startup, safety-monitor absence, manual takeover, Hold/Continue, cancel/new route,
+manager/follower/arbiter restarts, late messages, link loss and e-stop/reset. Record
+actual thrust and status topics. Then verify the motor controller's independent
+watchdog and stop path on the bench. Offline checks are not water-test clearance.

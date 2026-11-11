@@ -18,12 +18,13 @@ import math
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
 
 try:
     from smbus2 import SMBus
-except ImportError:  # no smbus2: the node falls back to mock mode
+except ImportError:  # Hardware startup refuses unless mock was explicitly requested
     SMBus = None
 
 MPU6050_ADDR = 0x68
@@ -195,22 +196,12 @@ class ImuPublisher(Node):
         self.timer = self.create_timer(period, self.timer_callback)
 
     def _build_backend(self, model, i2c_bus_num, address_param, force_mock):
-        if force_mock or SMBus is None:
-            if force_mock:
-                self.get_logger().info('IMU mock mode forced via "mock" parameter.')
-            else:
-                self.get_logger().warn(
-                    'smbus2 not installed (pip install smbus2 --break-system-packages) '
-                    '-- falling back to MOCK IMU so the rest of the stack can still be '
-                    'developed/tested off-hardware.')
+        if force_mock:
+            self.get_logger().warn('Explicit MOCK IMU requested; not hardware measurements')
             return MockBackend()
-
-        try:
-            bus = SMBus(i2c_bus_num)
-        except (FileNotFoundError, OSError) as e:
-            self.get_logger().warn(
-                f'Could not open I2C bus {i2c_bus_num} ({e}) -- falling back to MOCK IMU.')
-            return MockBackend()
+        if SMBus is None:
+            raise RuntimeError('smbus2 missing; refusing to fabricate IMU measurements')
+        bus = SMBus(i2c_bus_num)
 
         try:
             if model == 'bno055':
@@ -226,16 +217,10 @@ class ImuPublisher(Node):
                     f'gyro-integration only and will drift, see module docstring.')
                 return backend
             else:
-                self.get_logger().error(
-                    f'Unknown imu_model {model!r} (expected "mpu6050" or "bno055") -- '
-                    f'falling back to MOCK IMU.')
-                return MockBackend()
-        except Exception as e:  # noqa: BLE001 - any I2C/device error at init
-            self.get_logger().error(
-                f'Failed to initialise {model} on I2C bus {i2c_bus_num}: {e} -- '
-                f'falling back to MOCK IMU. Check wiring/address before trusting '
-                f'anything downstream of boat/imu.')
-            return MockBackend()
+                raise ValueError(f'Unknown imu_model {model!r}')
+        except Exception:
+            bus.close()
+            raise
 
     def timer_callback(self):
         try:
@@ -252,11 +237,11 @@ class ImuPublisher(Node):
         msg.orientation_covariance = orientation_cov
 
         msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = angular_velocity
-        # -1.0 marks the covariance as unknown (sensor_msgs/Imu convention).
-        msg.angular_velocity_covariance = [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        # Zero covariance means unknown; -1 would mean no measurement.
+        msg.angular_velocity_covariance = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z = linear_acceleration
-        msg.linear_acceleration_covariance = [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        msg.linear_acceleration_covariance = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         self.publisher_.publish(msg)
 
@@ -266,11 +251,11 @@ def main(args=None):
     node = ImuPublisher()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

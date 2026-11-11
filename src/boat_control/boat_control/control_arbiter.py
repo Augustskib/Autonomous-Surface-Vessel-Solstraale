@@ -17,6 +17,7 @@ boat won't drive, check `ros2 topic echo boat/mode` first.
 import json
 import time
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.clock import Clock, ClockType
 from std_msgs.msg import Bool, String
@@ -82,8 +83,7 @@ class ControlArbiter(Node):
             'Priority: estop > hold > safety-stop > manual > recovery > waypoint > '
             'zero. Source timeout %.2fs, lease timeout %.2fs, failsafe level '
             'timeout %.2fs. Manual requires an explicit lease on '
-            'boat/cmd/control_mode; thrust traffic alone no longer counts as '
-            'manual control.'
+            'boat/operator_command; legacy split commands are disabled. '
             % (self.logic.source_timeout_sec, self.logic.lease_timeout_sec,
                self.logic.failsafe_timeout_sec))
 
@@ -99,13 +99,22 @@ class ControlArbiter(Node):
             data = json.loads(msg.data)
         except (ValueError, TypeError):
             return
-        ok, reason = self.logic.on_operator_command(data, self._now())
-        if ok and data.get('intent') in ('ESTOP', 'RESET'):
+        if not isinstance(data, dict):
+            return
+        ticket = None
+        if data.get('prepare') is True:
+            ticket = self.logic.prepare_transition(data, self._now())
+            ok, reason = bool(ticket), 'Prepared' if ticket else 'Cannot prepare transition'
+        else:
+            ok, reason = self.logic.on_operator_command(data, self._now())
+        if ok and not data.get('prepare') and data.get('intent') in ('ESTOP', 'RESET'):
             self.estop_pub.publish(Bool(data=data['intent'] == 'ESTOP'))
         if isinstance(data, dict):
-            self._publish_operator_status(data.get('session'), data.get('seq'), ok, reason)
+            self._publish_operator_status(data.get('session'), data.get('seq'), ok, reason,
+                                          data.get('request_id'), ticket)
 
-    def _publish_operator_status(self, session=None, seq=None, accepted=True, reason=''):
+    def _publish_operator_status(self, session=None, seq=None, accepted=True, reason='',
+                                 request_id=None, ticket=None):
         left, right, mode = self.logic.evaluate(self._now())
         self.operator_pub.publish(String(data=json.dumps({
             'session': self.logic.operator_session,
@@ -116,6 +125,8 @@ class ControlArbiter(Node):
             'mode': mode, 'left': left, 'right': right,
             'request_session': session, 'request_seq': seq,
             'accepted': accepted, 'reason': reason,
+            'request_id': request_id, 'ticket': ticket,
+            'authority': self.logic.authority,
         })))
 
     # Subscriptions
@@ -123,7 +134,7 @@ class ControlArbiter(Node):
     def _manual_callback(self, msg: ThrustCommand):
         if not self.logic.on_manual_thrust(msg.left, msg.right, self._now()):
             self.get_logger().warn(
-                'Discarded non-finite manual thrust command (left=%r right=%r)'
+                'Rejected legacy manual command (left=%r right=%r)'
                 % (msg.left, msg.right), throttle_duration_sec=5.0)
 
     def _waypoint_callback(self, msg: ThrustCommand):
@@ -140,7 +151,7 @@ class ControlArbiter(Node):
                 throttle_duration_sec=5.0)
 
     def _failsafe_state_callback(self, msg: FailsafeState):
-        self.logic.on_failsafe_level(msg.level, self._now())
+        self.logic.on_failsafe_level(msg.level, self._now(), msg.manual_recovery_allowed)
 
     def _estop_callback(self, msg: Bool):
         self.logic.on_estop(msg.data)
@@ -149,8 +160,8 @@ class ControlArbiter(Node):
         command = (msg.data or '').strip().upper()
         if not self.logic.on_control_mode(command, self._now()):
             self.get_logger().warn(
-                'Ignoring unrecognized control_mode command: %r '
-                '(expected MANUAL, RELEASE or RESUME)' % msg.data,
+                'Rejected legacy control_mode command: %r '
+                '(use sequenced operator controls)' % msg.data,
                 throttle_duration_sec=5.0)
 
     # Arbitration
@@ -172,7 +183,7 @@ class ControlArbiter(Node):
             self.get_logger().warn(
                 'Manual lease EXPIRED (no heartbeat for >%.2fs) -- holding zero '
                 'thrust. Autonomy will NOT resume by itself; press Resume Auto '
-                'on the dashboard (or publish RESUME to boat/cmd/control_mode).'
+                'on the dashboard.'
                 % self.logic.lease_timeout_sec)
 
         msg = ThrustCommand()
@@ -195,11 +206,11 @@ def main(args=None):
     node = ControlArbiter()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

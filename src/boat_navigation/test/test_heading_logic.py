@@ -358,6 +358,38 @@ def test_a_reversed_gyro_sign_makes_the_filter_fight_itself():
         % (err_ok, err_bad))
 
 
+def test_missing_gyro_cannot_coast_on_a_frozen_value():
+    est = HeadingEstimator()
+    est.on_cog(90, 1.0, 0.0)
+    est.on_gyro_rate(0, 0.0)
+    assert est.evaluate(2.0).quality == QUALITY_NONE
+    assert est.evaluate(30.0).confidence == 0.0
+    est.on_gyro_rate(0, 30.0)
+    est.on_gyro_rate(0, 30.05)
+    assert est.evaluate(30.05).quality == QUALITY_NONE
+    est.on_cog(95, 1.0, 30.05)
+    assert est.evaluate(30.05).quality == QUALITY_FUSED
+
+
+def test_first_gyro_after_long_silence_does_not_restore_old_heading():
+    est = HeadingEstimator()
+    est.on_cog(90, 1, 0)
+    est.on_gyro_rate(0, 30)
+    assert not est.evaluate(30).usable
+    est.on_cog(100, 1, 31)
+    est.on_gyro_rate(0, 31.1)
+    assert est.evaluate(31.1).usable
+
+
+def test_invalid_speed_cannot_reuse_previous_valid_speed():
+    est = HeadingEstimator()
+    est.on_cog(90, 1.0, 0)
+    for bad in (float('nan'), float('inf'), -1, None, 'bad'):
+        assert not est.on_cog(180, bad, 1)
+        assert not est.evaluate(1).cog_valid
+        assert est.last_reference_at == 0
+
+
 # Scenario trace
 
 def scenario_survey_leg_then_slow_manoeuvre():
