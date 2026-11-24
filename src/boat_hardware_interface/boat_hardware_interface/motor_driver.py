@@ -8,6 +8,7 @@ firmware/boat_motor_controller for the protocol.
 import math
 import json
 import re
+import time
 
 import serial
 import rclpy
@@ -35,6 +36,10 @@ RECONNECT_PERIOD_SEC = 5.0
 
 # The Arduino sends an IMU line every 20 ms.
 SERIAL_READ_PERIOD_SEC = 0.02
+
+# An open port with nothing received for this long is treated as a lost link:
+# the port is closed and reopened by the reconnect timer.
+SERIAL_SILENCE_SEC = 2.0
 
 # Matches the firmware IMU line. Accel in g, gyro rates in deg/s.
 IMU_LINE_RE = re.compile(
@@ -92,6 +97,7 @@ class MotorDriver(Node):
         self._reset_stop_seen = False
         self.ser = None
         self._last_reconnect_attempt = None
+        self._last_rx = None
         if not self.mock:
             self._open_serial()
             self.reconnect_timer = self.create_timer(
@@ -112,9 +118,10 @@ class MotorDriver(Node):
     # Serial
 
     def _latch_link_fault(self):
-        self._link_needs_reset = True
-        self._reset_stop_seen = False
-        self.estop_active = True
+        # No operator STOP/RESET after a reconnect: the port is reopened with
+        # a zero command and then simply follows boat/thrust_command again.
+        # The Arduino's own 500 ms watchdog keeps the motors stopped while
+        # the link is down.
         self.last_command_time = None
         self._imu_last_time = None
 
@@ -122,14 +129,14 @@ class MotorDriver(Node):
         try:
             self.ser = serial.Serial(self.port, self.baud, timeout=0, write_timeout=0.1, exclusive=True)
             self._serial_rx_buf = b''
+            self._last_rx = time.monotonic()
             self._write_serial(0.0, 0.0)
             self.get_logger().info(f'Opened motor controller serial port {self.port}')
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError) as e:
             self._latch_link_fault()
             self.get_logger().error(
                 f'Failed to open motor controller serial port {self.port}: {e} '
-                f'-- will retry every {RECONNECT_PERIOD_SEC:.0f}s. Commands will '
-                f'be blocked until reconnection followed by STOP and RESET.')
+                f'-- will retry every {RECONNECT_PERIOD_SEC:.0f}s.')
             self.ser = None
 
     def _maybe_reconnect(self):
@@ -137,6 +144,17 @@ class MotorDriver(Node):
             return
         self.get_logger().warn('Motor controller serial port not open, retrying...')
         self._open_serial()
+
+    def _drop_link(self, reason):
+        """Latch the fault and close the port; the reconnect timer reopens it."""
+        self._latch_link_fault()
+        self.get_logger().warn(
+            f'Motor controller link lost: {reason} -- closing port, will attempt to reopen')
+        try:
+            self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
 
     def _write_serial(self, left, right):
         """Write the command to the Arduino. Never raises: on failure the
@@ -148,16 +166,9 @@ class MotorDriver(Node):
             payload = line.encode('ascii')
             if self.ser.write(payload) != len(payload):
                 raise serial.SerialException('Incomplete motor command write')
-        except serial.SerialException as e:
-            self._latch_link_fault()
-            self.get_logger().warn(
-                f'Serial write to motor controller failed: {e} -- '
-                f'closing port, will attempt to reopen')
-            try:
-                self.ser.close()
-            except Exception:
-                pass
-            self.ser = None
+        except (serial.SerialException, OSError) as e:
+            # A USB unplug can surface as OSError rather than SerialException.
+            self._drop_link(f'write failed: {e}')
 
     # ROS callbacks
 
@@ -227,6 +238,12 @@ class MotorDriver(Node):
             # Bounded read so a continuous IMU stream can't starve the thrust
             # callback or the watchdog. Partial lines are kept for next time.
             count = min(self.ser.in_waiting, 4096)
+            now = time.monotonic()
+            if not count:
+                if now - self._last_rx > SERIAL_SILENCE_SEC:
+                    self._drop_link(f'nothing received for {SERIAL_SILENCE_SEC:.0f}s')
+                return
+            self._last_rx = now
             if count:
                 self._serial_rx_buf += self.ser.read(count)
                 lines = self._serial_rx_buf.split(b'\n')
@@ -236,16 +253,10 @@ class MotorDriver(Node):
                 if len(self._serial_rx_buf) > 4096:
                     self._serial_rx_buf = b''
                     self.get_logger().warn('Discarded oversized serial telemetry line')
-        except serial.SerialException as e:
-            self._latch_link_fault()
-            self.get_logger().warn(
-                f'Serial read from motor controller failed: {e} -- '
-                f'closing port, will attempt to reopen')
-            try:
-                self.ser.close()
-            except Exception:
-                pass
-            self.ser = None
+        except (serial.SerialException, OSError) as e:
+            # in_waiting raises OSError, not SerialException, when the USB
+            # device disappears. Uncaught, that used to kill the node.
+            self._drop_link(f'read failed: {e}')
 
     def _handle_serial_line(self, raw_line):
         try:
