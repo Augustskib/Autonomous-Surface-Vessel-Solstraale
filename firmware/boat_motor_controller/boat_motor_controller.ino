@@ -19,12 +19,17 @@
  * zero and all enable pins go LOW. This runs on the Arduino so the motors
  * stop even if the Pi, ROS or the USB link dies.
  *
+ * A hardware watchdog restarts the board if loop() stalls for 2 s. setup()
+ * drops the enables, so a stalled board always comes back with motors off.
+ * "BOOT" and "BOOT IMU_DONE" lines on startup show how far setup got.
+ *
  * Motors are brushed DC thrusters, so they are driven with PWM duty on the
  * BTS7960 rather than an RC ESC.
  */
 
 #include <Arduino.h>
 #include <Arduino_Modulino.h>
+#include <WDT.h>
 
 ModulinoMovement movement;
 
@@ -83,10 +88,15 @@ void setup() {
   pinMode(PIN_R_L_EN, OUTPUT);
 
   stopAllMotors(/*dropEnable=*/true);
+  Serial.println("BOOT");
+
+  // Started before the IMU so a hang there also restarts the board.
+  WDT.begin(2000);
 
   // IMU on the Qwiic connector. Motor control still works if it is missing.
   Modulino.begin();
   movement.begin();
+  Serial.println("BOOT IMU_DONE");
 
   lastCommandMillis = millis();
   lastStatusMillis = millis();
@@ -94,6 +104,7 @@ void setup() {
 }
 
 void loop() {
+  WDT.refresh();
   readSerialCommands();
   checkWatchdog();
   maybeSendStatus();
