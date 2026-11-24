@@ -1,6 +1,7 @@
 // ASV ROS 2 adapter; vendor packet parsing remains in the separate Quanergy SDK.
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -25,6 +26,8 @@ class M8Node : public rclcpp::Node {
     frame_ = declare_parameter<std::string>("frame_id", "lidar_frame");
     mode_ = declare_parameter<std::string>("timestamp_mode", "receive");
     clock_verified_ = declare_parameter<bool>("sensor_clock_verified", false);
+    // Packets the client may queue while the pipeline is busy. 2000 M8 packets is about 13 MB.
+    const auto packet_buffer = declare_parameter<int>("packet_buffer", 2000);
     if (host.empty() || frame_.empty()) throw std::invalid_argument("host and frame_id required");
     if (mode_ != "sensor" && mode_ != "receive") throw std::invalid_argument("timestamp_mode must be sensor or receive");
     if (mode_ == "sensor" && !clock_verified_) throw std::invalid_argument("Verify sensor UTC synchronization before selecting sensor time");
@@ -39,7 +42,7 @@ class M8Node : public rclcpp::Node {
     cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/boat/lidar/points_raw", rclcpp::SensorDataQoS());
     status_pub_ = create_publisher<std_msgs::msg::String>("/boat/lidar/driver_status", 10);
     pipeline_ = std::make_unique<quanergy::pipeline::SensorPipeline>(settings);
-    client_ = std::make_unique<quanergy::client::SensorClient>(host, port, 100);
+    client_ = std::make_unique<quanergy::client::SensorClient>(host, port, packet_buffer);
     packet_connection_ = client_->connect([this](const std::shared_ptr<std::vector<char>>& p) { pipeline_->slot(p); });
     cloud_connection_ = pipeline_->connect([this](const boost::shared_ptr<pcl::PointCloud<quanergy::PointXYZIR>>& cloud) {
       sensor_msgs::msg::PointCloud2 msg;
@@ -52,11 +55,28 @@ class M8Node : public rclcpp::Node {
         return; // Never silently relabel a foreign clock as valid UTC.
       }
       if (msg.width == 0 || msg.height == 0) return;
-      cloud_pub_->publish(msg);
+      {
+        // Hand the cloud to the publisher thread so packet handling never waits on DDS.
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        pending_ = std::make_unique<sensor_msgs::msg::PointCloud2>(std::move(msg));
+      }
+      pending_cv_.notify_one();
       time_error_.store(false);
       last_cloud_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
       ++cloud_count_;
+    });
+    publisher_ = std::thread([this] {
+      while (true) {
+        std::unique_ptr<sensor_msgs::msg::PointCloud2> cloud;
+        {
+          std::unique_lock<std::mutex> lock(pending_mutex_);
+          pending_cv_.wait(lock, [this] { return pending_ || stopping_; });
+          if (stopping_) return;
+          cloud = std::move(pending_);
+        }
+        cloud_pub_->publish(std::move(cloud));
+      }
     });
     status_timer_ = create_wall_timer(std::chrono::seconds(1), [this] { publish_status(); });
     worker_ = std::thread([this] {
@@ -71,6 +91,12 @@ class M8Node : public rclcpp::Node {
     packet_connection_.disconnect();
     cloud_connection_.disconnect();
     pipeline_.reset(); // Join SDK callback worker before publishers are destroyed.
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      stopping_ = true;
+    }
+    pending_cv_.notify_one();
+    if (publisher_.joinable()) publisher_.join();
   }
  private:
   void publish_status() {
@@ -99,6 +125,12 @@ class M8Node : public rclcpp::Node {
   boost::signals2::connection packet_connection_, cloud_connection_;
   rclcpp::TimerBase::SharedPtr status_timer_;
   std::thread worker_;
+  // Latest cloud waiting to be published; an unpublished older cloud is replaced.
+  std::mutex pending_mutex_;
+  std::condition_variable pending_cv_;
+  std::unique_ptr<sensor_msgs::msg::PointCloud2> pending_;
+  bool stopping_ = false;
+  std::thread publisher_;
 };
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
