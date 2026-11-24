@@ -1,65 +1,61 @@
-# Green instrument console
+# Operator console
 
-The Pilot page uses the approved green-display / amber-indicator concept. This
-is implemented in the existing Flask page, not a generated background image.
+One page at `http://127.0.0.1:5000`, sized to the window with no page scroll.
 
-## Layout and implementation
+## Layout
 
-- `src/boat_web_ui/boat_web_ui/console.css` contains the shared visual theme and
-  responsive layout. `_compose()` embeds it in both Pilot and Data pages, and
-  `setup.py` includes it in the installed package.
-- `web_server.py` places heading, attitude readings, speed, battery and safety
-  in the left instrument stack; Leaflet in the center; camera, requested thrust
-  bars and a browser-local operator log on the right. The desktop command deck
-  remains below these panels. Navigation details, power diagnostics, docking
-  detection and geofence configuration are in an expandable lower panel.
-- The compass card rotates counterclockwise under a fixed bow pointer as
-  clockwise heading increases. Unknown heading dims the dial; raw IMU heading
-  retains its explicit no-estimator warning. Numeric telemetry remains the
-  source for the instrument; the dial adds no estimator or control logic.
-- Operator messages are rendered as plain text, newest first, bounded to 80
-  entries. This is browser-session history, not a ROS event archive. It does
-  not invent navigation events or persist across reloads.
-- The configured manual thrust ceiling is displayed read-only. An adjustable
-  thrust control is separate future functionality.
+- **Main view and inset.** The map fills the window and the camera sits in the
+  bottom right corner. The swap button on the inset exchanges them. The choice
+  is remembered in the browser.
+- **Top bar.** Tabs, status readouts (link, arbiter mode, mission state, GPS,
+  heading, speed, battery, recording, LiDAR) and Engine Stop. Reset to Hold
+  appears only while the stop is engaged.
+- **Failsafe strip.** Always visible under the top bar: state word, reason, and
+  Clear / Override when a failsafe is latched.
+- **Map tools (top left).** Layers menu (LiDAR, geofence, route and trail,
+  dock and launch, follow boat), Mission menu (start, return to dock, clear,
+  cancel, set dock) and the detection toggle.
+- **Drive card (bottom left).** Take Manual, Hold, Continue Mission and the
+  requested thrust bars. W/S/A/D drive while manual is confirmed.
+- **Tabs.** Pilot closes the drawer. Nav, Recording, Safety, Systems and Log
+  open one panel in a drawer on the right; the main view shrinks beside it.
+  `/data` redirects to the Recording tab.
+- **Messages.** Operator messages show as a toast for 8 s and are kept in the
+  Log tab (this browser session only, newest first, 80 entries).
 
-## Map clarification
+## Map
 
-This checkout uses Leaflet 1.9.4 with OpenStreetMap tiles. `foxglove_msgs/GeoJSON`
-is the route-data message format; the page is not an embedded Foxglove map.
-The old tile color inversion was removed. Chart labels, attribution and camera
-colors remain intact. Loading Leaflet and map tiles still requires network
-access to the existing external providers; this change does not add offline
-chart storage.
+Leaflet 1.9.4 with OpenStreetMap tiles, loaded from their public servers, so
+the laptop needs internet. The view (centre and zoom) is saved in the browser
+and restored on reload. With no saved view the map starts at the boat, or at
+the geofence centre when there is no fix. Zoom goes to 22; tiles are upscaled
+past 19.
 
-## Control semantics
+Without a GPS fix the boat is drawn grey at the geofence centre and a note
+says so. This is for display only and is what lets the LiDAR layer work
+indoors.
 
-The existing control handlers and backend policy are unchanged. Hold means
-zero requested thrust, not station keeping. Manual/Auto acknowledgments,
-lease renewal, emergency-stop/reset and mission cancellation retain their
-existing behavior. Clear Points, Cancel Mission and Hide Route Drawing remain
-separate actions; the earlier combined cancel-and-clear request is not part
-of this visual patch. Motor bars are requested thrust, not measured output.
+## LiDAR layer
 
-## UI verification before the control update
+`web_server` subscribes to `/boat/lidar/points_preview` and serves the newest
+cloud at `/lidar/scan` as top-down x,y points (at most 3000, sensor frame, x
+forward, y left). The page polls it twice a second only while the layer is
+on, and draws the points around the boat rotated by the displayed heading plus
+the yaw offset from the Layers menu. Nothing navigates on this view, and a
+scan older than 2 s is not drawn.
 
-- 16 Node tests pass, covering the actual composed Pilot-page JavaScript,
-  operator transitions, new heading display and bounded plain-text history.
-- 5 Python endpoint/adapter tests pass using in-memory transport.
-- Headless Chrome renders Pilot at 1440x900, 1024x768 and 390x844 without
-  horizontal overflow. Desktop Engine Stop remains within the viewport.
-- Data page also renders in Chrome. These are disconnected checks; camera,
-  ROS, physical motors and live telemetry were not exercised.
-- In the isolated browser test, Leaflet was served from a downloaded copy of
-  the same version because the sandbox could not resolve the external CDN.
-  Production CDN URLs were independently checked and returned HTTP 200.
+## Files
 
-Rebuild/install `boat_web_ui` in the normal ROS workspace and restart its web
-server to deploy. The CSS is loaded when the server composes its templates;
-refreshing the browser alone does not reload a running server's templates.
+`console.html`, `console.css`, `console.js` and `operator_controls.js` in
+`src/boat_web_ui/boat_web_ui/`. `web_server.py` joins them once at start, so
+rebuild `boat_web_ui` and restart the launch after editing them.
 
-## Control update, 7 November 2026
+Control semantics are unchanged and described in
+[operator-handover.md](operator-handover.md).
 
-The earlier behavior description above is historical. Cancel + Clear Route now
-cancels the identified mission and removes its drawing after acknowledgement.
-See [operator-handover.md](operator-handover.md) for the current control contract.
+## Tests
+
+```
+node --test src/boat_web_ui/test/operator_controls.test.cjs src/boat_web_ui/test/pilot_page.test.cjs src/boat_web_ui/test/recording_page.test.cjs
+python3 -m pytest tests/test_lidar_view.py src/boat_web_ui/test/test_operator_endpoint.py
+```

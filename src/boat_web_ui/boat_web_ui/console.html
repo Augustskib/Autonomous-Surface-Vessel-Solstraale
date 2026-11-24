@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOLSTRÅLE | ASV Console</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+/*__CONSOLE_CSS__*/
+</style>
+</head>
+<body>
+
+<header class="bar">
+    <div class="brand">SOLSTRÅLE<span>ASV-01</span></div>
+    <nav class="tabs" id="tabs">
+        <button class="tab active" data-tab="pilot">Pilot</button>
+        <button class="tab" data-tab="nav">Nav</button>
+        <button class="tab" data-tab="recording">Recording</button>
+        <button class="tab" data-tab="safety">Safety</button>
+        <button class="tab" data-tab="systems">Systems</button>
+        <button class="tab" data-tab="log">Log</button>
+    </nav>
+    <div class="chips">
+        <span class="chip" id="link_badge">LINK</span>
+        <span class="chip" title="Source the control arbiter is selecting">MODE <b id="mode_state">--</b></span>
+        <span class="chip" id="state_badge" title="Mission state">--</span>
+        <span class="chip" title="GPS fix age">GPS <b id="gpsage_val">NO FIX</b></span>
+        <span class="chip" title="Heading">HDG <b id="heading_val">--</b></span>
+        <span class="chip wide-only" title="Ground speed">SPD <b id="speed_val">--</b></span>
+        <span class="chip wide-only" title="Pack voltage">BAT <b id="pwr_pack">--</b></span>
+        <span class="chip" id="rec_badge">REC OFF</span>
+        <span class="chip" id="lidar_badge">LIDAR OFF</span>
+    </div>
+    <button class="btn-reset" id="reset_btn" onclick="resetToIdle()" hidden>Reset to Hold</button>
+    <button class="btn-estop" onclick="engineStop()">Engine Stop</button>
+</header>
+
+<div class="banner none" id="fs_banner">
+    <span class="b-glyph" id="fs_glyph">&#9679;</span>
+    <span id="fs_word">WAITING FOR SUPERVISOR</span>
+    <span class="b-why" id="fs_why">safety_monitor has not published boat/failsafe_state yet</span>
+    <span class="b-act" id="fs_actions"></span>
+</div>
+
+<main class="stage" id="stage">
+
+    <section class="view main" id="view_map">
+        <div id="map"></div>
+        <canvas id="lidar_canvas"></canvas>
+        <button class="swap" onclick="swapViews()" title="Swap map and camera">&#8644;</button>
+    </section>
+
+    <section class="view pip" id="view_cam">
+        <img id="camera_pane" src="/video_feed" alt="Waiting for camera feed">
+        <button class="swap" onclick="swapViews()" title="Swap map and camera">&#8644;</button>
+    </section>
+
+    <!-- Map tools: dropdown menus, top left. -->
+    <div class="tools" id="tools">
+        <div class="menu">
+            <button class="menu-btn" data-menu="layers_menu">Layers &#9662;</button>
+            <div class="menu-list" id="layers_menu" hidden>
+                <label><input type="checkbox" id="layer_lidar"> LiDAR</label>
+                <label><input type="checkbox" id="layer_fence" checked> Geofence</label>
+                <label><input type="checkbox" id="layer_route" checked> Route and trail</label>
+                <label><input type="checkbox" id="layer_marks" checked> Dock and launch</label>
+                <label><input type="checkbox" id="layer_follow"> Follow boat</label>
+                <div class="menu-sep"></div>
+                <label class="menu-field">LiDAR yaw offset (deg, display only)
+                    <input type="number" id="lidar_yaw" value="0" step="5"></label>
+                <button onclick="centerOnBoat()">Center on boat</button>
+            </div>
+        </div>
+        <div class="menu">
+            <button class="menu-btn" data-menu="mission_menu">Mission &#9662;</button>
+            <div class="menu-list" id="mission_menu" hidden>
+                <button class="go" onclick="sendMission()">Start mission (<span id="plotted_val">0</span> plotted)</button>
+                <button onclick="returnToDock()">Return to dock</button>
+                <button onclick="clearPending()">Clear points</button>
+                <button onclick="cancelMission()">Cancel mission and clear route</button>
+                <div class="menu-sep"></div>
+                <button onclick="setDockHere()">Set dock at boat</button>
+                <div class="menu-note">Left click the map to plot waypoints. Right click moves the dock.</div>
+            </div>
+        </div>
+        <button class="menu-btn" id="det_toggle_badge" onclick="toggleDetections()" title="Toggle YOLO detection overlay on the camera">DETECT: OFF</button>
+        <span class="pos-note" id="pos_note" hidden></span>
+    </div>
+
+    <!-- Drive controls, bottom left. -->
+    <div class="drive" id="drive">
+        <div class="drive-row">
+            <span class="lbl">Your control</span><b id="lease_state">not acquired</b>
+        </div>
+        <div class="drive-btns">
+            <button onclick="acquireLease('button')">Take Manual</button>
+            <button onclick="releaseLease()">Hold</button>
+            <button class="go" onclick="resumeAuto()">Continue Mission</button>
+        </div>
+        <div class="eng">
+            <span class="lbl">PORT</span>
+            <div class="track"><i></i><div class="fill" id="left_bar"></div></div>
+            <b id="left_val">0</b>
+        </div>
+        <div class="eng">
+            <span class="lbl">STBD</span>
+            <div class="track"><i></i><div class="fill" id="right_bar"></div></div>
+            <b id="right_val">0</b>
+        </div>
+        <div class="drive-note">W/S throttle, A/D turn. Limit __MANUAL_THRUST_LIMIT__%. Bars show requested thrust.</div>
+    </div>
+
+    <!-- Mission line and operator messages, bottom centre. -->
+    <div class="status-stack">
+        <div class="toast" id="toast" hidden>
+            <span id="operator_notice" role="status" aria-live="polite"></span>
+            <button onclick="dismissToast()" title="Dismiss">&times;</button>
+        </div>
+        <div class="mission-line" id="mission_banner">NO ACTIVE MISSION</div>
+    </div>
+
+    <!-- Tab panels. One is shown at a time in the right-hand drawer. -->
+    <aside class="drawer" id="drawer" hidden>
+
+        <div class="panel" data-panel="nav" hidden>
+            <h2>Vessel</h2>
+            <div class="kv"><i>Heading quality</i><b id="hdgq_val">--</b></div>
+            <div class="kv"><i>Heading source</i><b id="hdgsrc_val">--</b></div>
+            <div class="kv"><i>Roll</i><b id="roll_val">--</b></div>
+            <div class="kv"><i>Pitch</i><b id="pitch_val">--</b></div>
+            <div class="kv"><i>Position</i><b id="gps_val">NO FIX</b></div>
+            <h2>Navigation</h2>
+            <div class="kv"><i>Waypoint</i><b id="wp_val">--</b></div>
+            <div class="kv"><i>Distance</i><b id="dist_val">--</b></div>
+            <div class="kv"><i>Bearing</i><b id="brg_val">--</b></div>
+            <div class="kv"><i>Heading error</i><b id="hdgerr_val">--</b></div>
+            <div class="kv"><i>Remaining</i><b id="rem_val">--</b></div>
+            <div class="kv"><i>ETA</i><b id="eta_val">--</b></div>
+            <div class="kv"><i>Progress</i><b id="prog_val">--</b></div>
+            <h2>Dock marker</h2>
+            <div class="kv"><i>Detected</i><b id="dockm_detected">--</b></div>
+            <div class="kv"><i>Distance</i><b id="dockm_dist">--</b></div>
+            <div class="kv"><i>Lateral</i><b id="dockm_lat">--</b></div>
+        </div>
+
+        <div class="panel" data-panel="recording" hidden>
+            <h2>Recording</h2>
+            <div id="capture_alert"></div>
+            <div class="form">
+                <input type="text" id="data_site" placeholder="Site (e.g. apartment)">
+                <input type="text" id="data_purpose" placeholder="Purpose (e.g. indoor data run)">
+                <select id="data_source">
+                    <option value="real">Real hardware</option>
+                    <option value="simulation">Simulation</option>
+                </select>
+            </div>
+            <div class="btn-row">
+                <button id="record_start" class="go" onclick="startDataRun()" disabled>Start Recording</button>
+                <button id="record_stop" onclick="stopDataRun()" disabled>Stop Recording</button>
+            </div>
+            <div class="kv"><i>State</i><b id="rec_state">OFF</b></div>
+            <div class="kv"><i>Writing to disk</i><b id="rec_writing">--</b></div>
+            <div class="kv"><i>Elapsed</i><b id="rec_elapsed">--</b></div>
+            <div class="kv"><i>Bag size</i><b id="rec_bag">--</b></div>
+            <div class="kv"><i>Write rate</i><b id="rec_rate">--</b></div>
+            <div class="kv"><i>Free disk</i><b id="rec_free_gb">--</b></div>
+            <div class="kv"><i>Time remaining</i><b id="rec_remaining">--</b></div>
+            <div class="kv"><i>Run ID</i><b id="rec_run_id">--</b></div>
+            <div class="kv"><i>Open segment</i><b id="rec_segment">--</b></div>
+            <details>
+                <summary>Segments and markers</summary>
+                <div class="form">
+                    <input type="text" id="segment_label" placeholder="Segment label (e.g. Dock approach)">
+                </div>
+                <div class="btn-row">
+                    <button onclick="beginSegment()">Begin Segment</button>
+                    <button onclick="endSegment()">End Segment</button>
+                </div>
+                <div class="form">
+                    <input type="text" id="marker_note" placeholder="Marker note (optional)">
+                </div>
+                <div class="btn-row"><button onclick="addMarker()">Mark Event</button></div>
+            </details>
+            <h2>Saved recordings</h2>
+            <div class="form">
+                <select id="saved_recordings" aria-label="Saved recording"></select>
+                <input id="recording_name" maxlength="80" placeholder="Name, e.g. Apartment run 1" aria-label="Recording name">
+            </div>
+            <div class="btn-row"><button id="record_save" onclick="saveRecordingName()" disabled>Save Name</button></div>
+            <p class="note" id="recording_details"></p>
+            <p class="note" id="recording_feedback" role="status"></p>
+        </div>
+
+        <div class="panel" data-panel="safety" hidden>
+            <h2>Safety</h2>
+            <div class="kv"><i>Engine stop</i><b id="estop_state">--</b></div>
+            <div class="kv"><i>Status</i><b id="safe_state">--</b></div>
+            <div class="kv"><i>Failsafe</i><b id="fs_state">--</b></div>
+            <div class="kv"><i>Geofence</i><b id="fence_state">--</b></div>
+            <div class="kv"><i>Fence margin</i><b id="fence_margin">--</b></div>
+            <div class="kv"><i>Time outside</i><b id="fence_outside">--</b></div>
+            <div class="kv"><i>GCS link</i><b id="gcs_link">--</b></div>
+            <h2>Geofence</h2>
+            <div class="form two">
+                <label>Radius (m)<input type="number" id="fence_radius_in" value="150" min="5" step="5"></label>
+                <label>Warn ring (frac)<input type="number" id="fence_warn_in" value="0.9" min="0.1" max="0.99" step="0.05"></label>
+            </div>
+            <div class="btn-row">
+                <button class="go" onclick="setFenceHere()">Set Fence Here</button>
+                <button onclick="setLaunchHere()">Set Launch Here</button>
+            </div>
+            <div class="btn-row">
+                <button onclick="enableFence()">Enable Fence</button>
+                <button class="warn" onclick="disableFence()">Disable Fence</button>
+            </div>
+            <h2>Override</h2>
+            <div class="form">
+                <input id="operator_reason" type="text" maxlength="240" placeholder="Reason (needed to disable the fence or override a failsafe)">
+            </div>
+            <p class="note">The reason is recorded into the run data.</p>
+        </div>
+
+        <div class="panel" data-panel="systems" hidden>
+            <h2>Power</h2>
+            <div class="kv"><i>Reserve</i><b id="pwr_reserve">--</b></div>
+            <div class="meter" id="pwr_meter"><span style="width:0%"></span></div>
+            <div id="pwr_channels"></div>
+            <h2>Host</h2>
+            <div class="kv"><i>CPU temp</i><b id="sys_temp">--</b></div>
+            <div class="kv"><i>Load (1m)</i><b id="sys_load">--</b></div>
+            <div class="kv"><i>Free storage</i><b id="sys_disk">--</b></div>
+            <div class="kv"><i>Throttling</i><b id="sys_throttle">--</b></div>
+            <h2>Camera</h2>
+            <div class="kv"><i>Source</i><b id="cam_source">--</b></div>
+            <div class="kv"><i>Health</i><b id="cam_health">--</b></div>
+            <div class="kv"><i>Frame rate</i><b id="cam_fps">--</b></div>
+            <div class="kv"><i>Intrinsics</i><b id="cam_calib">--</b></div>
+            <h2>LiDAR</h2>
+            <div class="kv"><i>Scan</i><b id="lidar_state">--</b></div>
+            <div class="kv"><i>Points shown</i><b id="lidar_points">--</b></div>
+            <div class="kv"><i>Timestamps</i><b id="lidar_time">--</b></div>
+        </div>
+
+        <div class="panel" data-panel="log" hidden>
+            <h2>Operator log <small>this browser</small></h2>
+            <pre id="operator_event_log" aria-label="Operator event history">No operator events in this session.</pre>
+        </div>
+
+    </aside>
+</main>
+
+<script>
+const MANUAL_THRUST_LIMIT = __MANUAL_THRUST_LIMIT__;
+//__CONSOLE_JS__
+</script>
+</body>
+</html>

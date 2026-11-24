@@ -10,11 +10,17 @@ const pages=JSON.parse(result.stdout);
 function scripts(html) {return [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map(m=>m[1]);}
 function page() {
     const requests=[],els=new Map(),events={},timers=[];
-    const element=id=>{if(!els.has(id))els.set(id,{style:{},value:'',innerText:'',textContent:'',
-        classList:{add(){},remove(){},toggle(){}},addEventListener(){},querySelector:()=>({style:{}})});return els.get(id);};
-    let chain;chain=new Proxy(function(){},{get:(_,p)=>p==='then'?undefined:chain,apply:()=>chain});
+    const element=id=>{if(!els.has(id))els.set(id,{style:{},dataset:{},value:'',innerText:'',textContent:'',
+        classList:{add(){},remove(){},toggle(){}},addEventListener(){},querySelector:()=>({style:{}}),
+        replaceChildren(){},appendChild(){},setAttribute(){},removeAttribute(){},getAttribute:()=>null,focus(){},
+        firstElementChild:{style:{}}});return els.get(id);};
+    // Stand-in for Leaflet: every property and call returns the same object,
+    // except properties a test assigns explicitly.
+    const over={};let chain;chain=new Proxy(function(){},{get:(_,p)=>p==='then'?undefined:(p in over?over[p]:chain),
+        set:(_,p,v)=>{over[p]=v;return true;},apply:()=>chain});
     const context={console,performance,crypto:require('node:crypto').webcrypto,Uint8Array,AbortController,Blob,
         document:{getElementById:element,querySelector:element,querySelectorAll:()=>[],
+            createElement:()=>element(Symbol()),
             addEventListener:(name,fn)=>events[name]=fn,hidden:false},
         navigator:{sendBeacon:(url,body)=>requests.push({url,body,beacon:true})},
         addEventListener:(name,fn)=>events[name]=fn,
@@ -33,18 +39,64 @@ function page() {
 }
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
-test('heading dial tracks clockwise headings and dims when no heading is available',()=>{
+test('heading readout shows fused, unknown and raw IMU headings distinctly',()=>{
     const p=page();
     p.c.updateHeading({quality:2,heading_deg:90,source:'FUSED'},null);
-    assert.equal(p.els.get('compass_card').style.transform,'rotate(-90deg)');
-    assert.equal(p.els.get('compass_card').style.opacity,'1');
     assert.equal(p.els.get('heading_val').innerText,'90.0°');
+    assert.equal(p.els.get('heading_val').className,'grn');
+    assert.equal(p.els.get('hdgq_val').innerText,'FUSED');
     p.c.updateHeading({quality:0,heading_deg:0},null);
-    assert.equal(p.els.get('compass_card').style.opacity,'0.2');
     assert.equal(p.els.get('heading_val').innerText,'--');
+    assert.equal(p.els.get('hdgq_val').className,'red');
     p.c.updateHeading({},270);
-    assert.equal(p.els.get('compass_card').style.transform,'rotate(-270deg)');
+    assert.equal(p.els.get('heading_val').innerText,'270.0°');
     assert.equal(p.els.get('hdgq_val').innerText,'NO ESTIMATOR');
+});
+
+test('telemetry renders with no GPS fix and places the boat at the fence centre',()=>{
+    const p=page();
+    p.c.renderTelemetry({operator_age_s:0.1,operator:{mode:'HOLD'},state:'IDLE',lat:null,lon:null,
+        heading:null,roll:null,pitch:null,estop:false,
+        safety:{level:0,fence_enabled:true,fence_center_lat:28.54,fence_center_lon:-81.379,
+            fence_radius_m:100,fence_warn_radius_m:90,fence_margin_m:null,fence_outside_sec:null,
+            gcs_heartbeat_age_sec:0.5},
+        failsafe:{level:0,heading_usable:false},recording:{status_fresh:true,recording:false,library:[]},
+        power:{seen:false},system:{},camera:{},lidar:{fresh:true,timestamp_mode:'receive'}});
+    assert.equal(p.els.get('gps_val').innerText,'NO FIX');
+    assert.equal(p.els.get('pos_note').hidden,false);
+    assert.equal(p.els.get('mode_state').innerText,'HOLD');
+    assert.equal(p.els.get('lidar_badge').innerText,'LIDAR LIVE');
+    assert.equal(p.els.get('fs_word').innerText,'NO USABLE HEADING');
+    assert.equal(p.els.get('record_start').disabled,false);
+    assert.equal(p.els.get('reset_btn').hidden,true);
+    const pose=vm.runInContext('boatPose',p.c);
+    assert.equal(pose.assumed,true);assert.equal(pose.lat,28.54);
+});
+
+test('a still boat eases toward jittery fixes; motion and big jumps show the raw fix',()=>{
+    const p=page();
+    let f=p.c.smoothFix(28.5404,-81.3790,false);
+    assert.deepEqual([...f],[28.5404,-81.3790]);
+    f=p.c.smoothFix(28.5405,-81.3790,false);            // ~11 m jitter
+    assert.ok(Math.abs(f[0]-28.540415)<1e-6,'moves 15% of the way');
+    f=p.c.smoothFix(28.5405,-81.3790,true);             // moving: raw
+    assert.deepEqual([...f],[28.5405,-81.3790]);
+    f=p.c.smoothFix(28.5500,-81.3790,false);            // >50 m: raw
+    assert.deepEqual([...f],[28.5500,-81.3790]);
+});
+
+test('LiDAR points rotate with heading: forward is north at 0 and east at 90',()=>{
+    const p=page();const drawn=[];
+    p.els.set('lidar_canvas',{width:0,height:0,getContext:()=>({clearRect(){},fillRect:(x,y)=>drawn.push([x,y]),fillStyle:''})});
+    vm.runInContext(`map.getSize=()=>({x:800,y:600});map.getZoom=()=>20;
+        map.latLngToContainerPoint=()=>({x:400,y:300});
+        layers.lidar=true;lidarYaw=0;lidarScan={fresh:true,xy:[1000,0]};
+        boatPose={lat:0,lon:0,heading:0,assumed:false};`,p.c);
+    p.c.redrawLidar();
+    vm.runInContext('boatPose.heading=90',p.c);p.c.redrawLidar();
+    const [north,east]=drawn;
+    assert.ok(Math.abs(north[0]-399)<1&&north[1]<300-50,'forward point should be drawn up the screen');
+    assert.ok(east[0]>400+50&&Math.abs(east[1]-299)<1,'forward point should be drawn to the right');
 });
 
 test('operator history is bounded and renders messages as plain text',()=>{
