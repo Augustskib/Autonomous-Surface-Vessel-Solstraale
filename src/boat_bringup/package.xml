@@ -25,5 +25,6 @@
     <build_type>ament_cmake</build_type>
   </export>
   <exec_depend>boat_data</exec_depend>
+  <exec_depend>boat_lidar</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
 </package>

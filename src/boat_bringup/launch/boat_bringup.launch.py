@@ -2,13 +2,18 @@
 
     Supply geofence_center_lat, geofence_center_lon and geofence_radius_m
     for the actual site. The launch intentionally has no simulation-site defaults.
+
+    lidar_host:=<sensor IP> also starts the Quanergy driver and the preview
+    node. It needs boat_lidar built with -DASV_BUILD_QUANERGY=ON.
 """
 
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.actions import Node
 
@@ -23,6 +28,18 @@ def generate_launch_description():
         DeclareLaunchArgument('geofence_radius_m', description='Approved operating radius in metres'),
         DeclareLaunchArgument('max_thrust_pct', default_value='30.0',
                               description='Thrust cap in percent, 0-100'),
+        DeclareLaunchArgument('record_min_free_gb', default_value='5.0',
+                              description='Free disk needed to start a recording, GB'),
+        DeclareLaunchArgument('record_stop_free_gb', default_value='2.0',
+                              description='Recording stops when free disk falls below this, GB'),
+        DeclareLaunchArgument('lidar_host', default_value='',
+                              description='LiDAR IP address. Empty leaves the LiDAR off'),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(
+                Path(get_package_share_directory('boat_lidar')) / 'launch' / 'quanergy.launch.py')),
+            launch_arguments={'host': LaunchConfiguration('lidar_host')}.items(),
+            condition=IfCondition(PythonExpression(["'", LaunchConfiguration('lidar_host'), "' != ''"])),
+        ),
         Node(
             package='boat_perception',
             executable='camera_publisher',
@@ -126,7 +143,9 @@ def generate_launch_description():
         ),
         Node(
             package='boat_data', executable='data_recorder', name='data_recorder',
-            output='screen', parameters=[{'min_free_gb': 5.0, 'stop_free_gb': 2.0,
+            output='screen', parameters=[{
+                'min_free_gb': ParameterValue(LaunchConfiguration('record_min_free_gb'), value_type=float),
+                'stop_free_gb': ParameterValue(LaunchConfiguration('record_stop_free_gb'), value_type=float),
                 'qos_overrides_path': str(Path(get_package_share_directory('boat_data')) / 'config' / 'recorder_qos.yaml')}],
         ),
         # Foxglove websocket on ws://<host>:8765.
