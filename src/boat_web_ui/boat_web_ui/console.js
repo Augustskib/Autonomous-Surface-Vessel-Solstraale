@@ -157,7 +157,7 @@ function applyLayers() {
     for (const name of Object.keys(groups)) {
         if (layers[name]) groups[name].addTo(map); else map.removeLayer(groups[name]);
     }
-    if (!layers.lidar) lidarScan = null;
+    if (!lidarWanted()) lidarScan = null;
     redrawLidar();
 }
 for (const name of Object.keys(layers)) {
@@ -216,8 +216,11 @@ function redrawLidar() {
     }
 }
 
+// Scans are fetched while the map layer is on or the LiDAR view is showing.
+function lidarWanted() { return layers.lidar || mainView === 'lidar'; }
+
 async function pollLidar() {
-    if (!layers.lidar || lidarBusy) return;
+    if (!lidarWanted() || lidarBusy) return;
     lidarBusy = true;
     try {
         const response = await fetch('/lidar/scan');
@@ -229,20 +232,130 @@ async function pollLidar() {
     }
     setText('lidar_points', lidarScan && lidarScan.fresh ? String(lidarScan.count) : '--');
     redrawLidar();
+    drawRadar();
 }
 setInterval(pollLidar, 500);
 
-// --- Main view / inset swap ---------------------------------------------------
-let mapIsMain = store.get('map_main', true);
-function applyViews() {
-    $('view_map').className = 'view ' + (mapIsMain ? 'main' : 'pip');
-    $('view_cam').className = 'view ' + (mapIsMain ? 'pip' : 'main');
-    refreshMapSize();
+// --- LiDAR view ----------------------------------------------------------------
+// Top-down, boat at the centre, bow up, in the sensor frame (x forward,
+// y left) turned by the yaw offset. Independent of GPS and heading, so it
+// works indoors and before the mount is measured. The range follows the scan
+// unless the operator zooms with the mouse wheel; double click returns to auto.
+let radarRangeM = null;  // null = automatic
+
+function niceStep(rangeM) {
+    for (const step of [0.5, 1, 2, 5, 10, 20, 50]) if (rangeM / step <= 5) return step;
+    return 100;
 }
-function swapViews() {
-    mapIsMain = !mapIsMain;
-    store.set('map_main', mapIsMain);
+
+function autoRange(xy) {
+    const dists = [];
+    for (let i = 0; i + 1 < xy.length; i += 2) dists.push(Math.hypot(xy[i], xy[i + 1]) / 100);
+    if (!dists.length) return 10;
+    dists.sort((a, b) => a - b);
+    const p95 = dists[Math.floor(dists.length * 0.95)];
+    return Math.min(100, Math.max(2, p95 * 1.15));
+}
+
+function drawRadar() {
+    const canvas = $('radar_canvas');
+    if (!canvas || mainView !== 'lidar') return;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (!w || !h) return;
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+    const fresh = lidarScan && lidarScan.fresh;
+    const xy = fresh ? (lidarScan.xy || []) : [];
+    const rangeM = radarRangeM || autoRange(xy);
+    const cx = w / 2, cy = h / 2;
+    const pxPerM = (Math.min(w, h) / 2 - 20) / rangeM;
+
+    // Range rings and labels.
+    const step = niceStep(rangeM);
+    ctx.strokeStyle = '#1e2a36';
+    ctx.fillStyle = '#5d6b7a';
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.lineWidth = 1;
+    for (let r = step; r <= rangeM + 1e-6; r += step) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r * pxPerM, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.fillText(r + ' m', cx + 4, cy - r * pxPerM - 3);
+    }
+    ctx.beginPath();
+    ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
+    ctx.moveTo(0, cy); ctx.lineTo(w, cy);
+    ctx.stroke();
+
+    // Points. Screen up is the bow.
+    const yaw = lidarYaw * Math.PI / 180;
+    const sin = Math.sin(yaw), cos = Math.cos(yaw);
+    ctx.fillStyle = 'rgba(57, 255, 136, 0.9)';
+    for (let i = 0; i + 1 < xy.length; i += 2) {
+        const x = xy[i] / 100, y = xy[i + 1] / 100;
+        // Same rotation as the map overlay with heading 0.
+        const fwd = x * cos + y * sin;
+        const right = x * sin - y * cos;
+        ctx.fillRect(cx + right * pxPerM - 1, cy - fwd * pxPerM - 1, 2, 2);
+    }
+
+    // Boat, bow up.
+    ctx.fillStyle = '#1f7fd1';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 12); ctx.lineTo(cx + 7, cy + 9); ctx.lineTo(cx, cy + 5); ctx.lineTo(cx - 7, cy + 9);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+    $('radar_note').textContent = fresh
+        ? lidarScan.count + ' points, range ' + rangeM.toFixed(1) + ' m'
+          + (radarRangeM ? ' (manual, double click for auto)' : ' (auto)')
+        : (lidarScan && lidarScan.error ? 'LiDAR: ' + lidarScan.error : 'Waiting for LiDAR');
+}
+
+const radarCanvas = $('radar_canvas');
+if (radarCanvas) {
+    radarCanvas.addEventListener('wheel', (event) => {
+        event.preventDefault();
+        const current = radarRangeM || autoRange(lidarScan && lidarScan.fresh ? lidarScan.xy || [] : []);
+        radarRangeM = Math.min(100, Math.max(1, current * (event.deltaY > 0 ? 1.2 : 1 / 1.2)));
+        drawRadar();
+    }, {passive: false});
+    radarCanvas.addEventListener('dblclick', () => { radarRangeM = null; drawRadar(); });
+}
+window.addEventListener('resize', () => drawRadar());
+
+// --- Main view / inset ----------------------------------------------------------
+// One main view (map, camera or LiDAR). The inset shows the camera, or the
+// map while the camera is the main view.
+const VIEWS = ['map', 'cam', 'lidar'];
+let mainView = store.get('main_view', store.get('map_main', true) ? 'map' : 'cam');
+if (!VIEWS.includes(mainView)) mainView = 'map';
+let mapIsMain = mainView === 'map';
+
+function applyViews() {
+    mapIsMain = mainView === 'map';
+    const pip = mainView === 'cam' ? 'map' : 'cam';
+    for (const view of VIEWS) {
+        const role = view === mainView ? 'main' : view === pip ? 'pip' : 'off';
+        $('view_' + view).className = 'view ' + role;
+    }
+    document.querySelectorAll('#viewpick button').forEach((button) => {
+        button.classList.toggle('active', button.dataset.view === mainView);
+    });
+    refreshMapSize();
+    if (mainView === 'lidar') { pollLidar(); drawRadar(); }
+}
+function setMainView(view) {
+    if (!VIEWS.includes(view)) return;
+    mainView = view;
+    store.set('main_view', mainView);
     applyViews();
+}
+// The inset's swap button brings the inset to the main view.
+function swapViews() {
+    setMainView(mainView === 'cam' ? 'map' : 'cam');
 }
 
 // --- Tabs and menus -----------------------------------------------------------

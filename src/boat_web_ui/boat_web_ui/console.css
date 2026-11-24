@@ -95,6 +95,24 @@ input[type=checkbox] { width: auto; }
 .stage.drawer-open .view.pip { right: calc(var(--drawer-w) + 12px); }
 #map { position: absolute; inset: 0; background: #0b0e12; }
 #lidar_canvas { position: absolute; inset: 0; z-index: 450; pointer-events: none; }
+.view.off { display: none; }
+#view_lidar { background: #05080b; }
+#radar_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.radar-note {
+    position: absolute; left: 12px; bottom: 10px; font-size: 12px; color: var(--dim);
+    pointer-events: none; font-variant-numeric: tabular-nums;
+}
+.viewpick {
+    position: absolute; top: 10px; right: 12px; z-index: 650; display: flex;
+}
+.stage.drawer-open .viewpick { right: calc(var(--drawer-w) + 12px); }
+.viewpick button {
+    padding: 4px 10px; border-radius: 0; background: rgba(14, 17, 22, .85);
+}
+.viewpick button:first-child { border-radius: 4px 0 0 4px; }
+.viewpick button:last-child { border-radius: 0 4px 4px 0; }
+.viewpick button + button { border-left: 0; }
+.viewpick button.active { color: var(--txt); background: var(--acc); border-color: var(--acc); }
 #camera_pane { width: 100%; height: 100%; object-fit: contain; display: block; }
 .view.pip #camera_pane { object-fit: cover; }
 .swap {

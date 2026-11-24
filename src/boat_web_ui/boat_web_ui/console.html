@@ -57,6 +57,18 @@
         <button class="swap" onclick="swapViews()" title="Swap map and camera">&#8644;</button>
     </section>
 
+    <!-- Boat-centred LiDAR view, bow up. Needs no GPS or heading. -->
+    <section class="view off" id="view_lidar">
+        <canvas id="radar_canvas"></canvas>
+        <div class="radar-note" id="radar_note">Waiting for LiDAR</div>
+    </section>
+
+    <div class="viewpick" id="viewpick">
+        <button data-view="map" onclick="setMainView('map')">Map</button>
+        <button data-view="cam" onclick="setMainView('cam')">Camera</button>
+        <button data-view="lidar" onclick="setMainView('lidar')">LiDAR</button>
+    </div>
+
     <!-- Map tools: dropdown menus, top left. -->
     <div class="tools" id="tools">
         <div class="menu">
