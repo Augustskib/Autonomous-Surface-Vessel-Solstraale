@@ -257,14 +257,19 @@ class DataRecorder(Node):
     def start_run(self, cmd):
         if self.proc is not None:
             self.get_logger().warn('Already recording %s -- ignoring start' % self.run_id)
+            self.last_command_result = {'action': 'start', 'ok': False, 'at': time.monotonic(),
+                                        'detail': 'Already recording %s' % self.run_id}
             return
 
         min_free_gb = float(self.get_parameter('min_free_gb').value)
         free_gb = shutil.disk_usage(str(self._ensure_root())).free / 1e9
         if free_gb < min_free_gb:
-            self.get_logger().error(
-                'Refusing to start: only %.1f GB free (need %.1f). A run that '
-                'fills the disk corrupts its own tail.' % (free_gb, min_free_gb))
+            detail = ('Refusing to start: only %.1f GB free (need %.1f). A run that '
+                      'fills the disk corrupts its own tail.' % (free_gb, min_free_gb))
+            self.get_logger().error(detail)
+            # Reported on boat/recording_status so the dashboard shows why.
+            self.last_command_result = {'action': 'start', 'ok': False,
+                                        'detail': detail, 'at': time.monotonic()}
             return
         # Log the implied run length at the start.
         self.get_logger().info(
