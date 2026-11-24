@@ -417,3 +417,79 @@ class HeadingEstimator:
                     % (speed, self.cog_min_speed_mps))
         return ('GPS fixes have stopped arriving despite ground speed %.2f m/s'
                 % speed)
+
+
+# Course and speed from GPS displacement over a baseline.
+#
+# Fix-to-fix differences are dominated by noise when the boat is slow or
+# stopped: a few metres of jitter at 1 Hz reads as 1-5 m/s with a random
+# course, which the filter would accept as a heading reference. Here a course
+# is only produced once the boat is further from an anchor fix than the
+# position noise can explain.
+
+DEFAULT_COG_BASELINE_M = 3.0      # never trust a shorter displacement
+DEFAULT_BASELINE_NOISE_FACTOR = 2.0  # baseline >= this x horizontal sigma
+DEFAULT_BASELINE_WINDOW_SEC = 20.0   # re-anchor if no real move within this
+
+
+class GpsBaseline:
+    """Turn raw fixes into (speed_mps, cog_deg) that ignore position jitter.
+
+    update() returns (speed, course) from anchor to fix once the boat leaves
+    the noise radius of the anchor; the anchor then moves to that fix. Between
+    those steps it returns (held speed, None). The held speed drops to 0.0
+    once the next step is overdue, so a stopped boat reads as stopped and the
+    filter can learn gyro bias. Pure Python, no ROS.
+    """
+
+    def __init__(self, min_baseline_m=DEFAULT_COG_BASELINE_M,
+                 noise_factor=DEFAULT_BASELINE_NOISE_FACTOR,
+                 window_sec=DEFAULT_BASELINE_WINDOW_SEC):
+        if min_baseline_m <= 0 or noise_factor < 0 or window_sec <= 0:
+            raise ValueError('invalid baseline parameters')
+        self.min_baseline_m = float(min_baseline_m)
+        self.noise_factor = float(noise_factor)
+        self.window_sec = float(window_sec)
+        self.reset()
+
+    def reset(self):
+        self._anchor = None
+        self._anchor_time = None
+        self._speed = 0.0
+
+    def threshold_m(self, sigma_m=None):
+        if sigma_m is None or not math.isfinite(sigma_m) or sigma_m <= 0:
+            return self.min_baseline_m
+        return max(self.min_baseline_m, self.noise_factor * sigma_m)
+
+    def update(self, lat, lon, now, sigma_m=None):
+        if self._anchor is None:
+            self._anchor, self._anchor_time = (lat, lon), now
+            return 0.0, None
+        elapsed = now - self._anchor_time
+        if elapsed <= 0:
+            return 0.0, None
+        dist = _distance_m(self._anchor[0], self._anchor[1], lat, lon)
+        threshold = self.threshold_m(sigma_m)
+        if dist >= threshold:
+            cog = course_over_ground_deg(self._anchor[0], self._anchor[1], lat, lon)
+            self._speed = dist / elapsed
+            self._anchor, self._anchor_time = (lat, lon), now
+            return self._speed, cog
+        if self._speed > 0 and elapsed > 2.0 * threshold / self._speed:
+            self._speed = 0.0  # next step overdue: the boat slowed or stopped
+        if elapsed > self.window_sec:
+            # Stationary (or creeping slower than the noise): start over so
+            # slow drift and old jitter never add up to a fake course.
+            self._anchor, self._anchor_time = (lat, lon), now
+            self._speed = 0.0
+        return self._speed, None
+
+
+def _distance_m(lat1, lon1, lat2, lon2):
+    """Haversine distance in metres."""
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))

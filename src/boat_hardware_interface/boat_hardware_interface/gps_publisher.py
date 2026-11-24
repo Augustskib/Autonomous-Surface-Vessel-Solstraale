@@ -13,6 +13,13 @@ from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 
 
+# Horizontal error per unit of HDOP, metres (1 sigma). Rough figure for a
+# u-blox NEO-6M; consumers use it to tell jitter from motion.
+UERE_M = 3.0
+# NavSatFix.COVARIANCE_TYPE_APPROXIMATED, as a literal so tests need no ROS.
+COVARIANCE_TYPE_APPROXIMATED = 1
+
+
 class GPSPublisher(Node):
     CLOCK_SKEW_CONFIRM_FIXES = 5
     _skew_ref = None
@@ -150,6 +157,16 @@ class GPSPublisher(Node):
                                      else NavSatStatus.STATUS_NO_FIX)
                 if quality > 0:
                     fix.latitude, fix.longitude, fix.altitude = lat, lon, alt
+                    try:
+                        hdop = float(getattr(msg, 'horizontal_dil', None))
+                    except (TypeError, ValueError):
+                        hdop = None
+                    if hdop is not None and math.isfinite(hdop) and 0 < hdop < 50:
+                        var_h = (hdop * UERE_M) ** 2
+                        # Vertical error is typically about twice horizontal.
+                        fix.position_covariance = [var_h, 0.0, 0.0, 0.0, var_h, 0.0,
+                                                   0.0, 0.0, 4.0 * var_h]
+                        fix.position_covariance_type = COVARIANCE_TYPE_APPROXIMATED
                 latest = fix
             except (pynmea2.ParseError, ValueError, TypeError, AttributeError, UnicodeError):
                 continue

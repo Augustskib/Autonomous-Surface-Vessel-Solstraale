@@ -33,7 +33,7 @@ from boat_navigation.heading import (
     DEFAULT_MAX_COAST_SEC,
     DEFAULT_STATIONARY_SPEED_MPS,
     HeadingEstimator as HeadingFilter,
-    course_over_ground_deg,
+    GpsBaseline,
     normalize_angle_deg,
 )
 
@@ -47,12 +47,8 @@ MIN_FIX_DT_SEC = 0.01
 MAX_FIX_DT_SEC = 5.0
 MAX_PLAUSIBLE_SPEED_MPS = 15.0
 
-# Minimum movement between fixes for their course to mean anything. Extra
-# check on top of the filter's speed gate, for long gaps between fixes.
-MIN_FIX_STEP_M = 0.3
-
-# Ground speed EMA weight, same as waypoint_follower so both show the same speed.
-SPEED_EMA_ALPHA = 0.25
+# NavSatFix.COVARIANCE_TYPE_UNKNOWN, as a literal so tests need no ROS.
+COVARIANCE_TYPE_UNKNOWN = 0
 
 ZERO_RATE_EPSILON = 1e-9
 
@@ -116,6 +112,8 @@ class HeadingEstimatorNode(Node):
         self._prev_fix = None
         self._prev_fix_time = None
         self._speed_mps = 0.0
+        # Course only from displacement larger than the GPS noise.
+        self.baseline = GpsBaseline()
 
         self._prev_imu_yaw_deg = None
         self._prev_imu_time = None
@@ -211,17 +209,26 @@ class HeadingEstimatorNode(Node):
             self._prev_fix, self._prev_fix_time = fix, now
             return
 
-        self._speed_mps = (SPEED_EMA_ALPHA * inst_speed
-                           + (1.0 - SPEED_EMA_ALPHA) * self._speed_mps)
-        self.filter.on_ground_speed(self._speed_mps)
-
-        # Only offer a course when the boat moved far enough between fixes.
-        if step_m >= MIN_FIX_STEP_M:
-            cog = course_over_ground_deg(
-                self._prev_fix[0], self._prev_fix[1], fix[0], fix[1])
-            self.filter.on_cog(cog, self._speed_mps, now)
-
         self._prev_fix, self._prev_fix_time = fix, now
+
+        # Speed and course from displacement beyond the reported noise, so a
+        # still boat with a jittery fix reads as still and gets no course.
+        speed, cog = self.baseline.update(fix[0], fix[1], now, self._sigma_m(msg))
+        self._speed_mps = speed
+        self.filter.on_ground_speed(speed)
+        if cog is not None:
+            self.filter.on_cog(cog, speed, now)
+
+    @staticmethod
+    def _sigma_m(msg):
+        """Horizontal 1-sigma from the fix covariance, or None if unknown."""
+        try:
+            if msg.position_covariance_type == COVARIANCE_TYPE_UNKNOWN:
+                return None
+            var = max(msg.position_covariance[0], msg.position_covariance[4])
+        except (AttributeError, IndexError, TypeError):
+            return None
+        return math.sqrt(var) if math.isfinite(var) and var > 0 else None
 
     # Output
 
