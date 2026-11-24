@@ -22,7 +22,9 @@ with no way back. So:
     so it always degrades.
 
 Engagement latches: once a failsafe fires the boat does not return to
-NOMINAL until an operator clears it (boat/failsafe_clear). The response
+NOMINAL until an operator clears it (boat/failsafe_clear). One exception:
+a failsafe caused only by ground-control link loss clears itself when the
+link comes back, so the operator gets control straight back. The response
 level is still recomputed each tick, so the boat can move from
 POWERED_STOP to RETURN_TO_LAUNCH when a heading comes back.
 
@@ -63,6 +65,7 @@ REASON_ESTOP = 'ESTOP'
 REASON_GEOFENCE_BREACH = 'GEOFENCE_BREACH'
 REASON_GCS_LINK_LOST = 'GCS_LINK_LOST'
 REASON_GCS_LINK_LOST_PROLONGED = 'GCS_LINK_LOST_PROLONGED'
+LINK_REASONS = frozenset((REASON_GCS_LINK_LOST, REASON_GCS_LINK_LOST_PROLONGED))
 
 EARTH_RADIUS_M = 6371000.0
 
@@ -258,6 +261,9 @@ class FailsafeSupervisor:
         self._estop_entered_at = None
         self.escalations = 0
         self.clears = 0
+        # Reason codes seen since the latch engaged, for the link-only auto clear.
+        self._engaged_reasons = set()
+        self.auto_clears = 0
 
     # Observations
 
@@ -447,7 +453,14 @@ class FailsafeSupervisor:
             decision.active_reasons = [c[2] for c in conditions]
             applied, degraded = self.select_level(requested, now)
             decision.degraded_reason = degraded
+            self._engaged_reasons.update(c[1] for c in conditions)
         else:
+            # Latched only by a lost ground-control link and the link is
+            # back: hand control straight back to the operator.
+            if (self.engaged and self._engaged_reasons
+                    and self._engaged_reasons <= LINK_REASONS):
+                self._disengage(now)
+                self.auto_clears += 1
             # Nothing live but latched: keep the last response instead of
             # declaring the emergency over.
             applied = self._latched_action if self.engaged else LEVEL_NOMINAL
@@ -573,6 +586,7 @@ class FailsafeSupervisor:
         self.level = LEVEL_NOMINAL
         self._latched_action = LEVEL_NOMINAL
         self._level_entered_at = now
+        self._engaged_reasons = set()
         self.clears += 1
 
     def _seconds_at_level(self, now):

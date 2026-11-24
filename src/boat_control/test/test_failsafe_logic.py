@@ -691,3 +691,28 @@ def _run_standalone():
 
 if __name__ == '__main__':
     sys.exit(_run_standalone())
+
+
+def test_link_only_failsafe_clears_itself_when_link_returns():
+    """Link loss stops the boat; the link coming back returns control."""
+    sup = make_supervisor(gcs_rtl_after_sec=30.0)
+    sup.on_gcs_link(True, 100.0)
+    d = sup.evaluate(100.0)
+    assert d.level == LEVEL_POWERED_STOP and d.latched
+    sup.on_gcs_link(False, 105.0)
+    d = sup.evaluate(105.0)
+    assert d.level == LEVEL_NOMINAL
+    assert not d.latched
+    assert sup.auto_clears == 1
+
+
+def test_link_loss_plus_breach_stays_latched_after_link_returns():
+    """A failsafe that also saw a fence breach still needs an operator."""
+    sup = make_supervisor(gcs_rtl_after_sec=30.0)
+    sup.on_gcs_link(True, 0.0)
+    sup.evaluate(0.0)
+    sup._engaged_reasons.add(REASON_GEOFENCE_BREACH)
+    sup.on_gcs_link(False, 5.0)
+    d = sup.evaluate(5.0)
+    assert d.latched
+    assert sup.auto_clears == 0
