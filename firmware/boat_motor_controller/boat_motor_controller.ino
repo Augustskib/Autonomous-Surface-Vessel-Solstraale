@@ -35,7 +35,7 @@ unsigned long lastImuMillis = 0;
 // Left motor BTS7960
 const uint8_t PIN_L_RPWM = 5;
 const uint8_t PIN_L_LPWM = 6;
-const uint8_t PIN_L_R_EN = 2;
+const uint8_t PIN_L_R_EN = 12;  // moved from D2 2026-11-13: D2 output read 0.47 V when HIGH
 const uint8_t PIN_L_L_EN = 4;
 const uint8_t PIN_L_R_IS = A0;
 const uint8_t PIN_L_L_IS = A1;
@@ -156,7 +156,11 @@ void handleLine(const char *line) {
   left = clampThrust(left);
   right = clampThrust(right);
 
-  applyThrust(left, right);
+  // Re-apply only on a change. Repeating the same command every 50-100 ms
+  // must not pulse the enables low and restart the PWM each time.
+  if (watchdogTripped || left != currentLeft || right != currentRight) {
+    applyThrust(left, right);
+  }
   currentLeft = left;
   currentRight = right;
   lastCommandMillis = millis();
